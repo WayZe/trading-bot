@@ -10,9 +10,12 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
-# Project data & artifacts
-data/
-reports/
+# Project data & artifacts (root only, not src/trading_bot/data)
+/data/
+/reports/
 
 # OS
 .DS_Store
+
+# Local agent tooling
+.zcode/
