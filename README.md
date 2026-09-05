@@ -100,13 +100,48 @@ uv run trading-bot sweep --config config/backtest.yaml \
 таблицей с лучшей комбинацией по доходности. Для больших сеток в таблице
 показываются только топ-10, полные результаты — в CSV.
 
+**5. Walk-forward валидация** — честная проверка сетки без заглядывания в
+будущее. История делится на окна «ин-семпл (IS) → аут-оф-семпл (OOS)»: на IS
+перебирается сетка параметров, лучшая комбинация прогоняется на следующем
+OOS-отрезке. Сшитая (stitched) кривая из OOS-частей — оценка того, что
+стратегия реально дала бы при периодической переоптимизации:
+
+```bash
+uv run trading-bot walkforward --config config/backtest.yaml \
+  --param fast=10,20,30 --param slow=50,100 \
+  --is-days 180 --oos-days 60 --mode rolling --objective sharpe
+```
+
+- `--is-days` / `--oos-days` — длины окон обучения и проверки в днях
+  (дефолты 180/60); в rolling-режиме блоки IS→OOS идут встык, следующий IS
+  никогда не видит OOS-данные предыдущего окна; в `anchored`-режиме IS растёт
+  от начала истории.
+- `--objective` — метрика выбора лучшей комбинации на IS: `sharpe` или
+  `total_return_pct`.
+- `--symbol` / `--timeframe` — переопределение пары/таймфрейма из конфига.
+
+Перед каждым OOS-отрезком движок получает lead-in из `warmup_period` свечей
+стратегии: индикаторы и позиции «разогреваются» на прошлых данных, но PnL
+lead-in'а отбрасывается — OOS-метрики считаются от первой свечи OOS.
+
+Результаты пишутся в `reports/walkforward/last/`: `results.csv` (окна,
+лучшие параметры, IS objective, OOS-метрики), `stitched_equity.parquet`,
+`meta.json` и `walkforward.png` (сшитая кривая vs buy & hold за тот же
+период). В конце печатается сводка: stitched-доходность/CAGR/Шарп/просадка
+против buy & hold и среднее число сделок на окно.
+
+Как читать результат: если stitched-доходность заметно хуже результата того
+же sweep на всей истории — сетка на всей истории переобучилась (выбрала то,
+что случайно выстрелило в прошлом). Walk-forward ближе к тому, что было бы
+на живом графике, но и он — не гарантия: рынки меняются, окон мало.
+
 ## Архитектура
 
 Слои изолированы, зависимости направлены сверху вниз (CLI → engine → data):
 
 ```
 src/trading_bot/
-  cli.py           CLI (typer): download, backtest, report, sweep
+  cli.py           CLI (typer): download, backtest, report, sweep, walkforward
   config.py        pydantic-модель конфига бэктеста (config/backtest.yaml)
   indicators.py    векторные индикаторы: sma, ema, rsi, atr
   risk.py          размер позиции (доля equity, min_notional, округление)
@@ -116,7 +151,8 @@ src/trading_bot/
                    (кэш, позиция, TradeRecord), backtest (event loop)
   strategy/        плагины стратегий: base (Signal/Fill/Strategy ABC),
                    sma_cross, реестр по имени
-  research/        слой исследований: sweep по сетке параметров
+  research/        слой исследований: sweep по сетке параметров,
+                   walk-forward валидация (IS→OOS окна, stitched-кривая)
   report/          метрики прогона (metrics.py) и графики (plots.py)
 ```
 

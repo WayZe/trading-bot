@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 from typer.testing import CliRunner
@@ -151,6 +152,27 @@ def _prepare_data(tmp_path: Path, n_candles: int = 60) -> Path:
     """Save synthetic rising candles into tmp_path/data (the CLI data root)."""
     storage = CandleStorage(tmp_path / "data")
     storage.save("bybit", "BTC/USDT", "4h", rows_to_df(make_candles(n_candles)))
+    return storage.path_for("bybit", "BTC/USDT", "4h")
+
+
+def _prepare_cyclic_data(tmp_path: Path, n_candles: int) -> Path:
+    """Save sine-close candles (SMA crosses fire) into tmp_path/data."""
+    index = pd.date_range("2025-08-01", periods=n_candles, freq="4h", tz="UTC")
+    close = 100.0 + 10.0 * np.sin(np.arange(n_candles) * 2.0 * np.pi / 48.0)
+    open_ = np.roll(close, 1)
+    open_[0] = close[0]
+    df = pd.DataFrame(
+        {
+            "timestamp": index,
+            "open": open_,
+            "high": np.maximum(open_, close) + 1.0,
+            "low": np.minimum(open_, close) - 1.0,
+            "close": close,
+            "volume": 10.0,
+        }
+    )
+    storage = CandleStorage(tmp_path / "data")
+    storage.save("bybit", "BTC/USDT", "4h", df)
     return storage.path_for("bybit", "BTC/USDT", "4h")
 
 
@@ -532,3 +554,228 @@ class TestDownloadSince:
         assert "Updating" in result.output
         downloader_cls.return_value.update.assert_called_once()
         downloader_cls.return_value.download.assert_not_called()
+
+
+class TestWalkforward:
+    def test_runs_and_writes_artifacts(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        _prepare_cyclic_data(tmp_path, n_candles=540)  # 90 days at 4h
+        config = tmp_path / "backtest.yaml"
+        config.write_text(SWEEP_CONFIG, encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            [
+                "walkforward",
+                "--config",
+                str(config),
+                "--param",
+                "fast=3,4",
+                "--param",
+                "slow=6",
+                "--is-days",
+                "10",
+                "--oos-days",
+                "10",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Walk-forward" in result.output
+        assert "vs Buy & hold" in result.output
+        assert "сшитая OOS-кривая" in result.output
+
+        wf_dir = tmp_path / "reports" / "walkforward" / "last"
+        results = pd.read_csv(wf_dir / "results.csv")
+        assert len(results) == 4  # 20-day rolling blocks over 90 days
+        assert results["fast"].isin([3, 4]).all()
+        assert results["error"].isna().all()
+        assert "oos_return_pct" in results.columns
+        stitched = pd.read_parquet(wf_dir / "stitched_equity.parquet", engine="pyarrow")
+        assert len(stitched) > 0
+        assert stitched.iloc[0, 0] == pytest.approx(1.0)
+        png = wf_dir / "walkforward.png"
+        assert png.exists() and png.stat().st_size > 0
+        meta = json.loads((wf_dir / "meta.json").read_text(encoding="utf-8"))
+        assert meta["walkforward"]["mode"] == "rolling"
+        assert meta["walkforward"]["is_days"] == 10
+        assert meta["walkforward"]["objective"] == "sharpe"
+        assert meta["walkforward"]["param_grid"] == {"fast": [3, 4], "slow": [6]}
+        assert meta["config"]["symbol"] == "BTC/USDT"
+
+    def test_anchored_mode_and_objective_reach_meta(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        _prepare_cyclic_data(tmp_path, n_candles=540)
+        config = tmp_path / "backtest.yaml"
+        config.write_text(SWEEP_CONFIG, encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            [
+                "walkforward",
+                "--config",
+                str(config),
+                "--param",
+                "fast=3",
+                "--param",
+                "slow=6",
+                "--is-days",
+                "10",
+                "--oos-days",
+                "10",
+                "--mode",
+                "anchored",
+                "--objective",
+                "total_return_pct",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        wf_dir = tmp_path / "reports" / "walkforward" / "last"
+        meta = json.loads((wf_dir / "meta.json").read_text(encoding="utf-8"))
+        assert meta["walkforward"]["mode"] == "anchored"
+        assert meta["walkforward"]["objective"] == "total_return_pct"
+
+    def test_symbol_override(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        storage = CandleStorage(tmp_path / "data")
+        index = pd.date_range("2025-08-01", periods=540, freq="4h", tz="UTC")
+        close = 100.0 + 10.0 * np.sin(np.arange(540) * 2.0 * np.pi / 48.0)
+        open_ = np.roll(close, 1)
+        open_[0] = close[0]
+        storage.save(
+            "bybit",
+            "ETH/USDT",
+            "4h",
+            pd.DataFrame(
+                {
+                    "timestamp": index,
+                    "open": open_,
+                    "high": np.maximum(open_, close) + 1.0,
+                    "low": np.minimum(open_, close) - 1.0,
+                    "close": close,
+                    "volume": 10.0,
+                }
+            ),
+        )
+        config = tmp_path / "backtest.yaml"
+        config.write_text(SWEEP_CONFIG, encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            [
+                "walkforward",
+                "--config",
+                str(config),
+                "--symbol",
+                "ETH/USDT",
+                "--param",
+                "fast=3",
+                "--param",
+                "slow=6",
+                "--is-days",
+                "10",
+                "--oos-days",
+                "10",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        meta = json.loads(
+            (tmp_path / "reports" / "walkforward" / "last" / "meta.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert meta["config"]["symbol"] == "ETH/USDT"
+
+    def test_without_param_fails_with_hint(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        _prepare_cyclic_data(tmp_path, n_candles=180)
+        config = tmp_path / "backtest.yaml"
+        config.write_text(SWEEP_CONFIG, encoding="utf-8")
+
+        result = runner.invoke(app, ["walkforward", "--config", str(config)])
+
+        assert result.exit_code == 1
+        assert "--param" in result.output
+
+    def test_insufficient_data_fails_cleanly(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        _prepare_cyclic_data(tmp_path, n_candles=48)  # 8 days at 4h
+        config = tmp_path / "backtest.yaml"
+        config.write_text(SWEEP_CONFIG, encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            [
+                "walkforward",
+                "--config",
+                str(config),
+                "--param",
+                "fast=3",
+                "--param",
+                "slow=6",
+                "--is-days",
+                "30",
+                "--oos-days",
+                "30",
+            ],
+        )
+
+        assert result.exit_code == 1
+        assert "Ошибка walkforward" in result.output
+        assert "is_days=30" in result.output
+        assert "Traceback" not in result.output
+
+    def test_without_data_fails_with_download_hint(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        config = tmp_path / "backtest.yaml"
+        config.write_text(SWEEP_CONFIG, encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            [
+                "walkforward",
+                "--config",
+                str(config),
+                "--param",
+                "fast=3",
+                "--param",
+                "slow=6",
+            ],
+        )
+
+        assert result.exit_code == 1
+        assert "download" in result.output
+
+    def test_all_windows_error_still_reports(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        _prepare_cyclic_data(tmp_path, n_candles=180)
+        config = tmp_path / "backtest.yaml"
+        config.write_text(SWEEP_CONFIG, encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            [
+                "walkforward",
+                "--config",
+                str(config),
+                "--param",
+                "fast=10,20",
+                "--param",
+                "slow=6",
+                "--is-days",
+                "4",
+                "--oos-days",
+                "4",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Окон с ошибкой" in result.output
+        assert "Ни одно окно не выполнилось успешно" in result.output
+        wf_dir = tmp_path / "reports" / "walkforward" / "last"
+        assert (wf_dir / "results.csv").exists()
+        assert (wf_dir / "meta.json").exists()
+        assert not (wf_dir / "stitched_equity.parquet").exists()
+        assert not (wf_dir / "walkforward.png").exists()

@@ -25,8 +25,13 @@ from trading_bot.report import (
     compute_benchmark_metrics,
     compute_metrics,
 )
-from trading_bot.report.plots import plot_equity, plot_trades
-from trading_bot.research import run_sweep, slice_candles
+from trading_bot.report.plots import plot_equity, plot_stitched_equity, plot_trades
+from trading_bot.research import (
+    WalkForwardResult,
+    run_sweep,
+    run_walkforward,
+    slice_candles,
+)
 from trading_bot.research.sweep import METRIC_COLUMNS
 from trading_bot.strategy import create_strategy
 
@@ -38,6 +43,7 @@ DATA_ROOT = Path("data")
 REPORTS_DIR = Path("reports")
 LAST_RUN_DIR = REPORTS_DIR / "last_run"
 SWEEP_DIR = REPORTS_DIR / "sweep" / "last"
+WALKFORWARD_DIR = REPORTS_DIR / "walkforward" / "last"
 
 RUN_FILES = ("equity.parquet", "trades.csv", "meta.json")
 
@@ -393,6 +399,216 @@ def _sweep_cell(row: pd.Series, name: str) -> str:
         sign = "+" if name in ("total_return_pct", "max_drawdown_pct") else ""
         return f"{value:{sign}.2f}"
     return str(value)
+
+
+@app.command()
+def walkforward(
+    config: Annotated[
+        Path, typer.Option(help="Path to the backtest YAML config.")
+    ] = Path("config/backtest.yaml"),
+    param: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--param",
+            help="Параметр сетки 'name=v1,v2,...' (повторяемый): "
+            "--param fast=10,20,30 --param slow=50,100.",
+        ),
+    ] = None,
+    is_days: Annotated[
+        int, typer.Option(help="Длина ин-семпл окна (обучение), в днях.")
+    ] = 180,
+    oos_days: Annotated[
+        int, typer.Option(help="Длина аут-оф-семпл окна (проверка), в днях.")
+    ] = 60,
+    mode: Annotated[
+        str, typer.Option(help="Режим окон: rolling (скользящий) или anchored (якорный).")
+    ] = "rolling",
+    objective: Annotated[
+        str, typer.Option(help="Метрика выбора лучшей комбинации: sharpe или total_return_pct.")
+    ] = "sharpe",
+    symbol: Annotated[
+        str | None, typer.Option(help="Переопределить пару из конфига, напр. ETH/USDT.")
+    ] = None,
+    timeframe: Annotated[
+        str | None, typer.Option(help="Переопределить таймфрейм из конфига, напр. 1h.")
+    ] = None,
+) -> None:
+    """Walk-forward: перебор сетки на IS, проверка лучшей на OOS, сшитая кривая.
+
+    История делится на окна «ин-семпл → аут-оф-семпл». На каждом шаге сетка
+    параметров прогоняется на IS, лучшая комбинация (по --objective)
+    проверяется на следующем OOS-отрезке; сшитая кривая из OOS-частей —
+    оценка стратегии с периодической переоптимизацией без заглядывания
+    в будущее.
+    """
+    cfg = _apply_overrides(load_config(config), symbol, timeframe)
+    grid = _parse_grid(param)
+    if not grid:
+        typer.echo(
+            "Укажи хотя бы один параметр сетки: "
+            "--param fast=10,20,30 --param slow=50,100"
+        )
+        raise typer.Exit(code=1)
+
+    candles = _load_candles(cfg)
+
+    try:
+        wf = run_walkforward(
+            candles,
+            cfg,
+            grid,
+            is_days=is_days,
+            oos_days=oos_days,
+            mode=mode,
+            objective=objective,
+        )
+    except ValueError as error:
+        typer.echo(f"Ошибка walkforward: {error}")
+        raise typer.Exit(code=1) from error
+
+    _save_walkforward_artifacts(cfg, grid, wf)
+    _print_walkforward(cfg, grid, wf, candles)
+
+
+def _save_walkforward_artifacts(
+    cfg: BacktestConfig, grid: dict[str, list], wf: WalkForwardResult
+) -> None:
+    """Write results.csv, stitched_equity.parquet and meta.json to reports/walkforward/last/."""
+    WALKFORWARD_DIR.mkdir(parents=True, exist_ok=True)
+    wf.to_frame(grid).to_csv(WALKFORWARD_DIR / "results.csv", index=False)
+    meta = {"config": cfg.model_dump(mode="json"), "walkforward": wf.meta}
+    with (WALKFORWARD_DIR / "meta.json").open("w", encoding="utf-8") as file:
+        json.dump(meta, file, ensure_ascii=False, indent=2)
+    if not wf.stitched_equity.empty:
+        wf.stitched_equity.to_frame().to_parquet(
+            WALKFORWARD_DIR / "stitched_equity.parquet", engine="pyarrow"
+        )
+    typer.echo(f"Результаты: {WALKFORWARD_DIR / 'results.csv'}")
+
+
+def _print_walkforward(
+    cfg: BacktestConfig,
+    grid: dict[str, list],
+    wf: WalkForwardResult,
+    candles: pd.DataFrame,
+) -> None:
+    """Print the per-window table plus the stitched-vs-buy-&-hold summary."""
+    ok = [w for w in wf.windows if w.error is None]
+    failed = [w for w in wf.windows if w.error is not None]
+
+    table = Table(
+        title=f"Walk-forward: {cfg.strategy} · {cfg.symbol} · {cfg.timeframe} · "
+        f"{wf.meta['mode']} · IS {wf.meta['is_days']}д / OOS {wf.meta['oos_days']}д "
+        f"({len(wf.windows)} окон)",
+        title_justify="left",
+    )
+    table.add_column("OOS начало", no_wrap=True)
+    table.add_column("OOS конец", no_wrap=True)
+    for name in grid:
+        table.add_column(name, justify="right", no_wrap=True)
+    table.add_column(f"IS {wf.meta['objective']}", justify="right")
+    table.add_column("OOS доходность", justify="right")
+    table.add_column("OOS Шарп", justify="right")
+    table.add_column("Сделок", justify="right")
+    table.add_column("Ошибка", no_wrap=True, max_width=48, overflow="fold")
+
+    for window in ok:
+        table.add_row(
+            f"{window.oos_start:%Y-%m-%d}",
+            f"{window.oos_end:%Y-%m-%d}",
+            *(_fmt_grid_param(window.best_params, name) for name in grid),
+            _fmt_wf_num(window.is_objective),
+            _fmt_wf_num(window.oos_return_pct, signed=True),
+            _fmt_wf_num(window.oos_sharpe),
+            str(window.oos_trades if window.oos_trades is not None else 0),
+            "",
+        )
+    for window in failed:
+        table.add_row(
+            f"{window.oos_start:%Y-%m-%d}",
+            f"{window.oos_end:%Y-%m-%d}",
+            *("—" for _ in grid),
+            "—",
+            "—",
+            "—",
+            "—",
+            str(window.error),
+        )
+
+    Console().print(table)
+    if failed:
+        typer.echo(f"Окон с ошибкой: {len(failed)} (в конце таблицы).")
+
+    if not ok:
+        typer.echo("Ни одно окно не выполнилось успешно — см. тексты ошибок выше.")
+        return
+
+    _print_walkforward_summary(cfg, wf, candles, ok)
+
+
+def _print_walkforward_summary(
+    cfg: BacktestConfig, wf: WalkForwardResult, candles: pd.DataFrame, ok: list
+) -> None:
+    """Print stitched metrics vs buy & hold over the same OOS period + the plot."""
+    stitched = wf.stitched_equity
+    wf_start, wf_end = ok[0].oos_start, ok[-1].oos_end
+    closes = candles.loc[
+        (candles["timestamp"] >= wf_start) & (candles["timestamp"] < wf_end)
+    ].set_index("timestamp")["close"]
+    benchmark = benchmark_equity(closes.astype("float64"), 1.0)
+
+    strategy_metrics = compute_metrics(stitched, wf.trades, cfg.timeframe)
+    benchmark_metrics = compute_benchmark_metrics(benchmark, cfg.timeframe)
+
+    table = Table(title="Walk-forward (сшитая OOS-кривая) vs Buy & hold", title_justify="left")
+    table.add_column("Метрика", no_wrap=True)
+    table.add_column("Стратегия", justify="right")
+    table.add_column("Buy & hold", justify="right")
+    table.add_row(
+        "Доходность",
+        _fmt_pct(strategy_metrics.total_return_pct),
+        _fmt_pct(benchmark_metrics.total_return_pct),
+    )
+    table.add_row(
+        "Годовая доходность (CAGR)",
+        _fmt_opt(strategy_metrics.cagr_pct, _fmt_pct),
+        _fmt_opt(benchmark_metrics.cagr_pct, _fmt_pct),
+    )
+    table.add_row(
+        "Коэффициент Шарпа (аннуал.)",
+        _fmt_opt(strategy_metrics.sharpe, lambda v: f"{v:.2f}"),
+        _fmt_opt(benchmark_metrics.sharpe, lambda v: f"{v:.2f}"),
+    )
+    table.add_row(
+        "Максимальная просадка",
+        _fmt_pct(strategy_metrics.max_drawdown_pct),
+        _fmt_pct(benchmark_metrics.max_drawdown_pct),
+    )
+    Console().print(table)
+
+    n_trades = [w.oos_trades or 0 for w in ok]
+    typer.echo(
+        f"Сшитая кривая из {len(ok)} OOS-отрезков, "
+        f"{sum(n_trades)} сделок (в среднем {sum(n_trades) / len(ok):.1f} на окно)."
+    )
+    typer.echo(
+        "OOS-метрики считаются от первой свечи OOS-отрезка: lead-in перед окном "
+        "только разогревает индикаторы, его PnL отбрасывается."
+    )
+
+    plot_stitched_equity(stitched, WALKFORWARD_DIR / "walkforward.png", benchmark=benchmark)
+    typer.echo(f"График stitched-кривой: {WALKFORWARD_DIR / 'walkforward.png'}")
+
+
+def _fmt_wf_num(value: float | None, signed: bool = False) -> str:
+    """Format an optional walk-forward metric (2 dp, optional sign)."""
+    if value is None:
+        return "—"
+    return f"{value:+.2f}" if signed else f"{value:.2f}"
+
+
+def _fmt_grid_param(params: dict | None, name: str) -> str:
+    return "—" if params is None else str(params.get(name, "—"))
 
 
 def _summary(cfg: BacktestConfig, result: BacktestResult) -> dict:
