@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from trading_bot.report import plots
-from trading_bot.report.plots import plot_equity, plot_trades
+from trading_bot.report.plots import plot_equity, plot_stitched_equity, plot_trades
 
 
 def make_equity(n: int = 50) -> pd.Series:
@@ -75,6 +75,35 @@ def test_plot_equity_with_benchmark_overlay(tmp_path: Path, monkeypatch) -> None
     assert path.stat().st_size > 0
     assert len(ax.get_lines()) == 2
     assert "Стратегия" in labels
+    assert "Buy & hold" in labels
+
+
+def test_plot_stitched_equity_creates_non_empty_png(tmp_path: Path) -> None:
+    path = tmp_path / "walkforward.png"
+
+    plot_stitched_equity(make_equity() / 10_000.0, path)
+
+    assert path.exists()
+    assert path.stat().st_size > 0
+
+
+def test_plot_stitched_equity_with_benchmark_overlay(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "walkforward.png"
+    index = pd.date_range("2025-08-01", periods=50, freq="4h", tz="UTC")
+    benchmark = pd.Series([1.0 + 0.01 * i for i in range(50)], index=index, name="equity")
+
+    monkeypatch.setattr(plots.plt, "close", lambda *args, **kwargs: None)
+    try:
+        plot_stitched_equity(make_equity() / 10_000.0, path, benchmark=benchmark)
+        ax = plots.plt.gcf().axes[0]
+        labels = [line.get_label() for line in ax.get_lines()]
+    finally:
+        plots.plt.close("all")
+
+    assert path.exists()
+    assert path.stat().st_size > 0
+    assert len(ax.get_lines()) == 2
+    assert "Walk-forward" in labels[0]
     assert "Buy & hold" in labels
 
 

@@ -1,4 +1,4 @@
-"""Research layer: parameter-grid sweeps over the backtest engine."""
+"""Research layer: parameter-grid sweeps and walk-forward analysis."""
 
 from trading_bot.research.sweep import (
     MAX_COMBINATIONS,
@@ -6,10 +6,24 @@ from trading_bot.research.sweep import (
     run_sweep,
     slice_candles,
 )
+from trading_bot.research.walkforward import (
+    MAX_WINDOWS,
+    WalkForwardResult,
+    Window,
+    WindowResult,
+    plan_windows,
+    run_walkforward,
+)
 
 __all__ = [
     "MAX_COMBINATIONS",
+    "MAX_WINDOWS",
+    "Window",
+    "WindowResult",
+    "WalkForwardResult",
     "expand_grid",
+    "plan_windows",
     "run_sweep",
+    "run_walkforward",
     "slice_candles",
 ]
