@@ -264,6 +264,51 @@ class TestKillSwitch:
         assert state.position is not None
         assert [t["side"] for t in state.trades] == ["buy"]
 
+    def test_kill_switch_with_open_position_logs_distance_to_stop(
+        self, tmp_path, caplog
+    ) -> None:
+        runner, fake, cfg = make_runner(tmp_path, closes=FLAT, ticker_price=BREAKOUT_CLOSE)
+        runner.run_once()
+        append_candle(fake, [*FLAT, BREAKOUT_CLOSE])
+        fake.ticker_price = BREAKOUT_CLOSE
+        runner.run_once()
+        state = LiveState.load(cfg.state_path)
+        stop = state.active_stop
+
+        Path(cfg.kill_switch_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(cfg.kill_switch_path).write_text("stop", encoding="utf-8")
+        ticker = stop + 10.0  # выше стопа, но без защиты STOP-файла
+        fake.ticker_price = ticker
+        with caplog.at_level(logging.ERROR, logger="trading_bot.live.runner"):
+            runner.run_once()
+
+        # Каждый цикл: error с ценой и дистанцией до стопа — позиция без присмотра.
+        assert "NOT protected" in caplog.text
+        assert f"{ticker:.4f}" in caplog.text
+        assert f"{stop:.4f}" in caplog.text
+        assert LiveState.load(cfg.state_path).position is not None
+
+    def test_heartbeat_reports_both_switch_flags(self, tmp_path, caplog) -> None:
+        runner, fake, cfg = make_runner(tmp_path, closes=FLAT, ticker_price=100.0)
+        kill_path = Path(cfg.kill_switch_path)
+        kill_path.parent.mkdir(parents=True, exist_ok=True)
+        kill_path.write_text("stop", encoding="utf-8")
+        with caplog.at_level(logging.INFO, logger="trading_bot.live.runner"):
+            runner.run_once()
+
+        assert "kill_switch=active" in caplog.text
+        assert "pause=off" in caplog.text
+
+        # Переключаемся на PAUSE: флаги в heartbeat меняются местами.
+        kill_path.unlink()
+        Path(cfg.pause_switch_path).write_text("pause", encoding="utf-8")
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="trading_bot.live.runner"):
+            runner.run_once()
+
+        assert "kill_switch=off" in caplog.text
+        assert "pause=active" in caplog.text
+
 
 class TestNeedsAttention:
     def test_exchange_order_failure_sets_flag_and_blocks_trading(self, tmp_path, caplog) -> None:
@@ -506,6 +551,65 @@ class TestEntrySizing:
         expected_qty = math.floor(START_CASH * 0.95 / 100.0 * 10**6) / 10**6
         state = LiveState.load(cfg.state_path)
         assert state.position.quantity == pytest.approx(expected_qty)
+
+
+class TestPauseSwitch:
+    """PAUSE запрещает только входы; сигнальные выходы и стопы работают."""
+
+    def _open_position(self, tmp_path):
+        runner, fake, cfg = make_runner(tmp_path, closes=FLAT, ticker_price=BREAKOUT_CLOSE)
+        runner.run_once()
+        append_candle(fake, [*FLAT, BREAKOUT_CLOSE])
+        fake.ticker_price = BREAKOUT_CLOSE
+        runner.run_once()
+        assert LiveState.load(cfg.state_path).position is not None
+        return runner, fake, cfg
+
+    def _create_pause(self, cfg) -> None:
+        Path(cfg.pause_switch_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(cfg.pause_switch_path).write_text("pause", encoding="utf-8")
+
+    def test_pause_blocks_entry_but_processes_candles(self, tmp_path, caplog) -> None:
+        runner, fake, cfg = make_runner(tmp_path, closes=FLAT, ticker_price=BREAKOUT_CLOSE)
+        runner.run_once()
+        self._create_pause(cfg)
+
+        append_candle(fake, [*FLAT, BREAKOUT_CLOSE])
+        fake.ticker_price = BREAKOUT_CLOSE
+        with caplog.at_level(logging.WARNING, logger="trading_bot.live.runner"):
+            runner.run_once()
+
+        state = LiveState.load(cfg.state_path)
+        assert state.position is None
+        assert state.trades == []
+        # Свечи при PAUSE обрабатываются: заблокирован только вход.
+        assert state.last_candle_ts == _last_candle_iso(len(FLAT) + 1)
+        assert "pause switch is active" in caplog.text
+
+    def test_pause_allows_signal_exit(self, tmp_path) -> None:
+        runner, fake, cfg = self._open_position(tmp_path)
+        self._create_pause(cfg)
+
+        fake.ticker_price = 100.0  # выше стопа: выход именно по сигналу
+        append_candle(fake, [*FLAT, BREAKOUT_CLOSE, 95.0])
+        runner.run_once()
+
+        state = LiveState.load(cfg.state_path)
+        assert state.position is None
+        assert [t["side"] for t in state.trades] == ["buy", "sell"]
+        assert state.trades[-1]["reason"] == "donchian breakdown"
+
+    def test_pause_allows_protective_stop(self, tmp_path) -> None:
+        runner, fake, cfg = self._open_position(tmp_path)
+        stop = LiveState.load(cfg.state_path).active_stop
+        self._create_pause(cfg)
+
+        fake.ticker_price = stop - 5.0
+        runner.run_once()
+
+        state = LiveState.load(cfg.state_path)
+        assert state.position is None
+        assert state.trades[-1]["reason"] == "stop loss"
 
 
 def build_client(fake):

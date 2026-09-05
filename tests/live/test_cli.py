@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 
 import pandas as pd
@@ -167,6 +168,51 @@ class TestStateGuard:
         assert "corrupted" in result.output
 
 
+class TestStateLock:
+    def _invoke_once(self, tmp_path, mocker, fake, config):
+        _patched_client(mocker, fake)
+        return runner.invoke(app, ["live", "--config", str(config), "--once"])
+
+    def test_second_run_refused_while_lock_is_held(
+        self, tmp_path, monkeypatch, mocker
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        config = _write_config(tmp_path, LIVE_CONFIG)
+        fake = FakeCcxt(donchian_rows([100.0] * 6), ticker_price=100.0)
+
+        lock_path = tmp_path / "data" / "live" / "state.json.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("w") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self._invoke_once(tmp_path, mocker, fake, config)
+
+        assert result.exit_code == 1
+        assert "already running" in result.output
+        # Раннер не стартовал: ни баннера, ни state-файла.
+        assert "Position:" not in result.output
+        assert not (tmp_path / "data" / "live" / "state.json").exists()
+
+    def test_lock_is_released_after_run_allows_rerun(
+        self, tmp_path, monkeypatch, mocker
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        config = _write_config(tmp_path, LIVE_CONFIG)
+        fake = FakeCcxt(donchian_rows([100.0] * 6), ticker_price=100.0)
+        first = self._invoke_once(tmp_path, mocker, fake, config)
+        assert first.exit_code == 0, first.output
+
+        # Lock-файл остаётся на диске, но блокировка снята: повторный запуск
+        # в новом процессе проходит (см. также test_second_once_does_not_duplicate).
+        lock_path = tmp_path / "data" / "live" / "state.json.lock"
+        assert lock_path.exists()
+        with lock_path.open("w") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)  # не занимает никто
+
+        _patched_client(mocker, fake)
+        second = runner.invoke(app, ["live", "--config", str(config), "--once"])
+        assert second.exit_code == 0, second.output
+
+
 @pytest.mark.parametrize(
     ("bad_field", "bad_value"),
     [("timeframe", "7x"), ("mode", "real"), ("poll_seconds", "0"), ("symbol", "BTCUSDT")],
@@ -179,3 +225,30 @@ def test_invalid_config_fails_cleanly(tmp_path, bad_field: str, bad_value: str) 
     result = runner.invoke(app, ["live", "--config", str(config), "--once"])
 
     assert result.exit_code != 0
+
+
+def test_colliding_switch_paths_fail_cleanly(tmp_path, monkeypatch, mocker) -> None:
+    monkeypatch.chdir(tmp_path)
+    raw = yaml.safe_load(LIVE_CONFIG)
+    raw["pause_switch_path"] = raw["kill_switch_path"]
+    config = _write_config(tmp_path, yaml.safe_dump(raw))
+    fake = FakeCcxt(donchian_rows([100.0] * 6), ticker_price=100.0)
+    _patched_client(mocker, fake)
+
+    result = runner.invoke(app, ["live", "--config", str(config), "--once"])
+
+    assert result.exit_code != 0
+    assert "must be distinct" in result.output
+
+
+def test_banner_shows_both_switches(tmp_path, monkeypatch, mocker) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = _write_config(tmp_path, LIVE_CONFIG)
+    fake = FakeCcxt(donchian_rows([100.0] * 6), ticker_price=100.0)
+    _patched_client(mocker, fake)
+
+    result = runner.invoke(app, ["live", "--config", str(config), "--once"])
+
+    assert result.exit_code == 0, result.output
+    assert "Kill switch (data/live/STOP): off" in result.output
+    assert "Pause switch (data/live/PAUSE): off" in result.output

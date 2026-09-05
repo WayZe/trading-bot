@@ -173,6 +173,7 @@ class TestLiveConfig:
         assert cfg.data_root == "data/live"
         assert cfg.state_path == "data/live/state.json"
         assert cfg.kill_switch_path == "data/live/STOP"
+        assert cfg.pause_switch_path == "data/live/PAUSE"
         assert cfg.log_file == "logs/live.log"
 
     def test_shipped_live_config_loads(self) -> None:
@@ -182,6 +183,7 @@ class TestLiveConfig:
         assert cfg.strategy == "donchian_trend"
         assert cfg.strategy_params["entry_period"] == 40
         assert cfg.strategy_params["trend_period"] == 100
+        assert cfg.pause_switch_path == "data/live/PAUSE"
 
     def test_testnet_mode_passes(self) -> None:
         assert LiveConfig(mode="testnet").mode == "testnet"
@@ -206,3 +208,35 @@ class TestLiveConfig:
     def test_empty_strategy_name_raises(self) -> None:
         with pytest.raises(ValidationError, match="strategy"):
             LiveConfig(strategy="  ")
+
+    def test_distinct_switch_paths_pass(self) -> None:
+        cfg = LiveConfig(
+            state_path="s.json", kill_switch_path="STOP", pause_switch_path="PAUSE"
+        )
+
+        assert (cfg.state_path, cfg.kill_switch_path, cfg.pause_switch_path) == (
+            "s.json",
+            "STOP",
+            "PAUSE",
+        )
+
+    @pytest.mark.parametrize(
+        ("overrides", "collision"),
+        [
+            (
+                {"kill_switch_path": "data/live/PAUSE", "pause_switch_path": "data/live/PAUSE"},
+                "kill_switch_path == pause_switch_path",
+            ),
+            (
+                {"state_path": "data/live/PAUSE", "pause_switch_path": "data/live/PAUSE"},
+                "state_path == pause_switch_path",
+            ),
+            (
+                {"state_path": "data/live/STOP", "kill_switch_path": "data/live/STOP"},
+                "state_path == kill_switch_path",
+            ),
+        ],
+    )
+    def test_colliding_switch_paths_raise(self, overrides: dict, collision: str) -> None:
+        with pytest.raises(ValidationError, match="must be distinct"):
+            LiveConfig(**overrides)

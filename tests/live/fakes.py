@@ -139,6 +139,7 @@ def make_config(tmp_path, **overrides) -> LiveConfig:
         "data_root": str(tmp_path / "live" / "data"),
         "state_path": str(tmp_path / "live" / "state.json"),
         "kill_switch_path": str(tmp_path / "live" / "STOP"),
+        "pause_switch_path": str(tmp_path / "live" / "PAUSE"),
         "log_file": str(tmp_path / "live" / "logs" / "live.log"),
     }
     return LiveConfig.model_validate({**base, **overrides})

@@ -119,8 +119,11 @@ class LiveConfig(BaseModel):
         min_notional: минимальная стоимость ордера в котируемой валюте.
         data_root: корень Parquet-хранилища live-свечей (отдельно от research).
         state_path: путь к JSON-файлу персистентного состояния раннера.
-        kill_switch_path: путь файла-kill-switch; пока файл существует, любые
+        kill_switch_path: путь файла-STOP-свитча; пока файл существует, любые
             новые ордера запрещены (тикеры/свечи продолжают обрабатываться).
+        pause_switch_path: путь файла-PAUSE-свитча; пока файл существует,
+            запрещены только новые входы — сигнальные выходы и защитные
+            стоп/тейк исполняются как обычно.
         log_file: путь к rotating-логу раннера.
     """
 
@@ -150,6 +153,7 @@ class LiveConfig(BaseModel):
     data_root: str = "data/live"
     state_path: str = "data/live/state.json"
     kill_switch_path: str = "data/live/STOP"
+    pause_switch_path: str = "data/live/PAUSE"
     log_file: str = "logs/live.log"
 
     @field_validator("timeframe")
@@ -176,6 +180,38 @@ class LiveConfig(BaseModel):
         if not value.strip():
             raise ValueError("strategy must be a non-empty name")
         return value
+
+    @model_validator(mode="after")
+    def _validate_switch_paths(self) -> LiveConfig:
+        """Проверить, что пути state/STOP/PAUSE не совпадают друг с другом.
+
+        Совпадающие пути делают свитчи бессмысленными или опасными: файл,
+        блокирующий только входы (PAUSE), не должен оказаться тем же файлом,
+        что полный STOP, а оба — тем же файлом, что state (запись состояния
+        стёрла бы свитч и наоборот).
+
+        Raises:
+            ValueError: если любые два из путей ``state_path``,
+                ``kill_switch_path`` и ``pause_switch_path`` совпадают.
+        """
+        paths = {
+            "state_path": Path(self.state_path),
+            "kill_switch_path": Path(self.kill_switch_path),
+            "pause_switch_path": Path(self.pause_switch_path),
+        }
+        seen: dict[Path, str] = {}
+        collisions: list[str] = []
+        for name, path in paths.items():
+            first = seen.get(path)
+            if first is not None:
+                collisions.append(f"{first} == {name} ({path})")
+            else:
+                seen[path] = name
+        if collisions:
+            raise ValueError(
+                "live switch paths must be distinct: " + "; ".join(collisions)
+            )
+        return self
 
 
 def load_live_config(path: Path | str) -> LiveConfig:

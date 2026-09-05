@@ -30,10 +30,13 @@
 сигнал при этом считается потреблённым — свеча помечается обработанной и
 повторного ордера по тому же сигналу не будет.
 
-Защитные механизмы: kill-switch (``kill_switch_path``) — запрещены ВСЕ
-новые ордера, пока существует файл-свитч; флаг ``needs_attention``
-(после непонятного состояния ордера в testnet торговля стоит до ручного
-разбора); сетевые ошибки не убивают цикл, а логируются и пропускаются.
+Защитные механизмы: STOP (``kill_switch_path``) — запрещены ВСЕ новые
+ордера, включая защитные выходы (позиция остаётся без присмотра, что
+кричит в лог каждый цикл); PAUSE (``pause_switch_path``) — запрещены
+только новые входы, сигнальные выходы и защитные стоп/тейк работают;
+флаг ``needs_attention`` (после непонятного состояния ордера в testnet
+торговля стоит до ручного разбора); сетевые ошибки не убивают цикл,
+а логируются и пропускаются.
 
 Первая догрузка истории (чистый state) — только прогрев: исторические
 сигналы устарели, торговать по ним по текущей цене нельзя; торговля
@@ -187,22 +190,45 @@ class LiveRunner:
         """True, пока существует файл kill-switch (новые ордера запрещены)."""
         return Path(self.config.kill_switch_path).exists()
 
+    def pause_switch_active(self) -> bool:
+        """True, пока существует файл pause-switch (новые входы запрещены)."""
+        return Path(self.config.pause_switch_path).exists()
+
     # ------------------------------------------------------------------
     # Внутренний цикл
     # ------------------------------------------------------------------
 
     def _run_cycle(self) -> None:
         """Один цикл: тикер → защита позиции → свечи → heartbeat."""
+        ticker_price = self.exchange_client.fetch_ticker_last(self.config.symbol)
         if self.kill_switch_active():
             logger.warning(
                 "kill switch is active at %s: all new orders are forbidden this cycle",
                 self.config.kill_switch_path,
             )
-        ticker_price = self.exchange_client.fetch_ticker_last(self.config.symbol)
+            self._log_unprotected_position(ticker_price)
         self._protect_position(ticker_price)
         candles = self._sync_candles()
         self._process_new_candles(candles, ticker_price)
         self._heartbeat(ticker_price)
+
+    def _log_unprotected_position(self, ticker_price: float) -> None:
+        """STOP с открытой позицией: error каждый цикл — цена и дистанция до стопа.
+
+        Kill-switch запрещает и защитный выход, поэтому позиция остаётся без
+        присмотра; человек должен видеть, насколько цена близка к стопу,
+        чтобы снять свитч или закрыть позицию вручную.
+        """
+        stop = self.state.active_stop
+        if self.state.position is None or stop is None:
+            return
+        logger.error(
+            "kill switch is active with an open position: ticker %.4f, stop %.4f "
+            "(distance %.4f); the position is NOT protected while the switch exists",
+            ticker_price,
+            stop,
+            ticker_price - stop,
+        )
 
     def _protect_position(self, ticker_price: float) -> None:
         """Проверить открытую позицию по тикеру: пробой стопа/тейка → market-sell."""
@@ -425,7 +451,8 @@ class LiveRunner:
     ) -> FillResult | None:
         """Единственная точка размещения ордеров: свитчи, флаг внимания, ошибки.
 
-        Свитчи: kill-switch запрещает любые ордера; ``needs_attention``
+        Свитчи: STOP запрещает любые ордера; PAUSE — только входы (``side ==
+        "buy"``), выходы и защитные стоп/тейк проходят. ``needs_attention``
         блокирует всё до ручного сброса флага (все варианты — warning/error
         в лог).
 
@@ -437,6 +464,14 @@ class LiveRunner:
         не будет. Ошибка, гарантированно оставляющая ордер несозданным
         (валидация ccxt до отправки), повторится на следующем цикле безопасно.
         """
+        if side == "buy" and self.pause_switch_active():
+            logger.warning(
+                "entry order (%s) blocked: pause switch is active at %s "
+                "(exits are still allowed)",
+                reason,
+                self.config.pause_switch_path,
+            )
+            return None
         if self.kill_switch_active():
             logger.warning(
                 "order %s (%s) blocked: kill switch is active", side, reason
@@ -502,7 +537,8 @@ class LiveRunner:
             else str(pd.Timestamp(self._now_ms(), unit="ms", tz="UTC") - last_ts)
         )
         logger.info(
-            "heartbeat: mode=%s position=%s last_price=%.4f candle_age=%s kill_switch=%s",
+            "heartbeat: mode=%s position=%s last_price=%.4f candle_age=%s "
+            "kill_switch=%s pause=%s",
             self.config.mode,
             "flat"
             if position is None
@@ -510,6 +546,7 @@ class LiveRunner:
             ticker_price,
             candle_age,
             "active" if self.kill_switch_active() else "off",
+            "active" if self.pause_switch_active() else "off",
         )
 
     def _warmup_strategy(self) -> None:

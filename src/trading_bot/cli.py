@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import math
@@ -148,12 +149,28 @@ def live(
 
     Режим исполнения берётся из конфига (paper по умолчанию); ``--dry-run``
     форсирует paper. Состояние (позиция, стопы, последняя обработанная
-    свеча) переживает рестарты через JSON-файл из конфига.
+    свеча) переживает рестарты через JSON-файл из конфига. Параллельный
+    запуск над тем же state-файлом запрещён эксклюзивной блокировкой
+    (``<state>.lock``): два раннера на одном состоянии задвоили бы ордера.
     """
-    cfg = load_live_config(config)
+    try:
+        cfg = load_live_config(config)
+    except ValueError as error:
+        # Невалидный YAML/поля конфига (включая совпадающие пути свитчей):
+        # печатаем короткое сообщение вместо traceback pydantic.
+        typer.echo(f"Ошибка live-конфига: {error}")
+        raise typer.Exit(code=1) from error
     if dry_run and cfg.mode != "paper":
         typer.echo("--dry-run: forcing paper mode (testnet adapter is disabled)")
         cfg = LiveConfig.model_validate({**cfg.model_dump(), "mode": "paper"})
+
+    state_lock = _acquire_state_lock(cfg.state_path)
+    if state_lock is None:
+        typer.echo(
+            f"live runner is already running for state {cfg.state_path} "
+            "(lock file is held); refusing to start a second instance"
+        )
+        raise typer.Exit(code=1)
 
     try:
         strategy = create_strategy(cfg.strategy, cfg.strategy_params)
@@ -199,6 +216,27 @@ def live(
         runner.run_forever()
 
 
+def _acquire_state_lock(state_path: str | Path):
+    """Эксклюзивная блокировка против параллельного запуска (``fcntl.flock``).
+
+    Блокируется отдельный файл ``<state>.lock`` рядом с state: если другой
+    процесс раннера уже держит его, возвращается ``None`` — второй запуск
+    над тем же состоянием должен отказаться стартовать (задвоил бы ордера
+    и перезаписывал state друг друга). Хендлер держится открытым всё время
+    работы команды: закрытие процесса снимает блокировку автоматически,
+    даже после крэша.
+    """
+    lock_path = Path(str(state_path) + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("w")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
 def _build_exchange_client(cfg: LiveConfig) -> ExchangeClient:
     """Создать клиент биржи под режим конфига (ключи — только из окружения).
 
@@ -221,13 +259,19 @@ def _build_exchange_client(cfg: LiveConfig) -> ExchangeClient:
 
 
 def _print_live_banner(cfg: LiveConfig, state, runner: LiveRunner) -> None:
-    """Напечатать стартовую сводку: режим, контур, kill-switch, позиция."""
+    """Напечатать стартовую сводку: режим, контур, свитчи, позиция."""
     typer.echo(
         f"Live runner: mode={cfg.mode} symbol={cfg.symbol} timeframe={cfg.timeframe}"
     )
     typer.echo(f"Strategy: {cfg.strategy} {cfg.strategy_params}")
-    kill_state = "ACTIVE (orders forbidden)" if runner.kill_switch_active() else "off"
+    kill_state = "ACTIVE (all orders forbidden)" if runner.kill_switch_active() else "off"
     typer.echo(f"Kill switch ({cfg.kill_switch_path}): {kill_state}")
+    pause_state = (
+        "ACTIVE (entries forbidden, exits allowed)"
+        if runner.pause_switch_active()
+        else "off"
+    )
+    typer.echo(f"Pause switch ({cfg.pause_switch_path}): {pause_state}")
     if state.position is None:
         typer.echo("Position: flat")
     else:
