@@ -40,15 +40,22 @@ from trading_bot.engine.portfolio import (
     Portfolio,
     Position,
 )
+from trading_bot.engine.stops import (
+    REASON_STOP_LOSS,
+    REASON_TAKE_PROFIT,
+)
+from trading_bot.engine.stops import (
+    reanchor_stop_below as _reanchor_below,
+)
+from trading_bot.engine.stops import (
+    reanchor_take_profit_above as _reanchor_above,
+)
 from trading_bot.risk import RiskManager
 from trading_bot.strategy.base import Signal, SignalKind, Strategy
 
 logger = logging.getLogger(__name__)
 
 REQUIRED_COLUMNS = ("timestamp", "open", "high", "low", "close")
-
-REASON_STOP_LOSS = "stop loss"
-REASON_TAKE_PROFIT = "take profit"
 
 
 def validate_candles(candles: pd.DataFrame) -> None:
@@ -74,47 +81,6 @@ def validate_candles(candles: pd.DataFrame) -> None:
         raise ValueError(
             f"candles contain {int(inverted.sum())} candle(s) where high < low"
         )
-
-
-def _reanchor_below(
-    level: float | None, ref_close: float | None, fill_price: float
-) -> float | None:
-    """Переякорить уровень стопа на фактическую цену исполнения.
-
-    Стратегия задаёт дистанцию стопа относительно close сигнальной свечи
-    (``ref_close - level``); движок переносит эту дистанцию на фактическую
-    цену входа, чтобы стоп следовал за реально заплаченной ценой. Отсутствие
-    или неположительность дистанции отключает уровень.
-    """
-    if level is None or ref_close is None:
-        return None
-    distance = ref_close - level
-    if distance <= 0.0:
-        logger.warning(
-            "stop level %.4f is not below the signal close %.4f: stop disabled",
-            level,
-            ref_close,
-        )
-        return None
-    return fill_price - distance
-
-
-def _reanchor_above(
-    level: float | None, ref_close: float | None, fill_price: float
-) -> float | None:
-    """Переякорить уровень тейк-профита на фактическую цену исполнения (симметрично)."""
-    if level is None or ref_close is None:
-        return None
-    distance = level - ref_close
-    if distance <= 0.0:
-        logger.warning(
-            "take-profit level %.4f is not above the signal close %.4f: "
-            "take-profit disabled",
-            level,
-            ref_close,
-        )
-        return None
-    return fill_price + distance
 
 
 @dataclass
