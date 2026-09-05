@@ -1,14 +1,24 @@
-# Пример конфига бэктеста (этап 3).
+# Конфиг бэктеста.
 # Все даты — UTC, формат YYYY-MM-DD.
 
 # Торговая пара (формат ccxt) и таймфрейм свечей.
 symbol: BTC/USDT
 timeframe: 4h
 
-# Период бэктеста: start включительно, end не включительно.
+# Период бэктеста: start включительно, end не включается.
 # end: null — до последних доступных данных.
-start: "2022-01-01"
+start: "2025-08-01"
 end: null
+
+# Капитал и размер позиции:
+#   start_cash — стартовый кэш в котируемой валюте (USDT);
+#   position_size_pct — доля капитала под позицию (0.95 = 95% equity);
+#   min_notional — минимальный объём ордера в USDT, меньше — сделка не проходит;
+#   quantity_precision — до скольки знаков округляется количество (вниз).
+start_cash: 10000.0
+position_size_pct: 0.95
+min_notional: 5.0
+quantity_precision: 6
 
 # Издержки исполнения:
 #   fee_rate — комиссия taker за сторону сделки (0.001 = 0.1%);
@@ -16,11 +26,13 @@ end: null
 fee_rate: 0.001
 slippage_bps: 5.0
 
-# Доля капитала, выделяемая под позицию (0.95 = 95% equity).
-position_size_pct: 0.95
-
-# Стратегия (плагин) и её параметры: пересечение SMA(20) и SMA(50).
+# Стратегия (плагин) и её параметры:
+#   fast/slow — периоды быстрой и медленной SMA (вход/выход по кроссу);
+#   atr_period — период ATR для стопа;
+#   atr_mult — множитель ATR: стоп = цена - atr_mult * ATR.
 strategy: sma_cross
 strategy_params:
-  fast_period: 20
-  slow_period: 50
+  fast: 20
+  slow: 50
+  atr_period: 14
+  atr_mult: 2.0

@@ -57,9 +57,12 @@ strategy_params:
         assert cfg.symbol == "BTC/USDT"
         assert cfg.timeframe == "4h"
         assert cfg.end is None
+        assert cfg.start_cash == 10_000.0
         assert cfg.fee_rate == 0.001
         assert cfg.slippage_bps == 5.0
         assert cfg.position_size_pct == 0.95
+        assert cfg.quantity_precision == 6
+        assert cfg.min_notional == 5.0
         assert cfg.strategy == "sma_cross"
         assert cfg.strategy_params == {}
 
@@ -69,7 +72,11 @@ strategy_params:
         assert cfg.symbol == "BTC/USDT"
         assert cfg.timeframe == "4h"
         assert cfg.strategy == "sma_cross"
-        assert cfg.strategy_params["fast_period"] == 20
+        assert cfg.strategy_params["fast"] == 20
+        assert cfg.strategy_params["slow"] == 50
+        assert cfg.start_cash == 10_000.0
+        assert cfg.quantity_precision == 6
+        assert cfg.min_notional == 5.0
 
     def test_missing_start_raises(self, tmp_path) -> None:
         path = write_config(tmp_path, "symbol: BTC/USDT\n")
@@ -106,3 +113,15 @@ class TestBacktestConfig:
     def test_negative_fee_raises(self) -> None:
         with pytest.raises(ValidationError):
             BacktestConfig(start="2024-01-01", fee_rate=-0.1)
+
+    def test_nonpositive_start_cash_raises(self) -> None:
+        with pytest.raises(ValidationError):
+            BacktestConfig(start="2024-01-01", start_cash=0.0)
+
+    def test_bad_quantity_precision_raises(self) -> None:
+        with pytest.raises(ValidationError):
+            BacktestConfig(start="2024-01-01", quantity_precision=-1)
+
+    def test_negative_min_notional_raises(self) -> None:
+        with pytest.raises(ValidationError):
+            BacktestConfig(start="2024-01-01", min_notional=-1.0)

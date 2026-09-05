@@ -19,10 +19,13 @@ class BacktestConfig(BaseModel):
         start: backtest start date, ``YYYY-MM-DD`` (inclusive).
         end: backtest end date, ``YYYY-MM-DD`` (exclusive); ``None`` means
             "up to the latest available data".
+        start_cash: initial cash in quote currency.
         fee_rate: exchange taker fee per trade side, as a fraction (0.001 = 0.1%).
         slippage_bps: execution slippage in basis points (5 bps = 0.05%).
         position_size_pct: fraction of equity allocated to a new position.
-        strategy: strategy plugin name (module under ``trading_bot.strategies``).
+        quantity_precision: decimal places entry quantities are rounded down to.
+        min_notional: minimum order value in quote currency.
+        strategy: strategy plugin name registered in ``trading_bot.strategy``.
         strategy_params: free-form parameters passed to the strategy plugin.
     """
 
@@ -30,9 +33,12 @@ class BacktestConfig(BaseModel):
     timeframe: str = "4h"
     start: str
     end: str | None = None
+    start_cash: float = Field(default=10_000.0, gt=0.0)
     fee_rate: float = Field(default=0.001, ge=0.0, le=0.1)
     slippage_bps: float = Field(default=5.0, ge=0.0)
     position_size_pct: float = Field(default=0.95, gt=0.0, le=1.0)
+    quantity_precision: int = Field(default=6, ge=0, le=10)
+    min_notional: float = Field(default=5.0, ge=0.0)
     strategy: str = "sma_cross"
     strategy_params: dict[str, Any] = Field(default_factory=dict)
 
