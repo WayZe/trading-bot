@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from tests.conftest import BASE_MS, HOUR_MS, rows_to_df
+from trading_bot.strategy import STRATEGY_REGISTRY, create_strategy
 from trading_bot.strategy.base import Fill, Signal, SignalKind, Strategy
 from trading_bot.strategy.sma_cross import SmaCrossStrategy
 from trading_bot.strategy.trend_filter import TrendFiltered
@@ -255,3 +256,33 @@ class TestWithRealInner:
         # Скачок свечи (close 104, prev close 100) обновляет Wilder-ATR(3)
         # до 3.0, дистанция стопа 2*ATR от close сигнальной свечи.
         assert signal.stop_loss == pytest.approx(104.0 - 2.0 * 3.0)
+
+
+class TestRegistry:
+    def test_sma_cross_trend_registered(self) -> None:
+        assert "sma_cross_trend" in STRATEGY_REGISTRY
+
+    def test_create_sma_cross_trend(self) -> None:
+        strategy = create_strategy(
+            "sma_cross_trend",
+            {"fast": 3, "slow": 5, "atr_period": 3, "atr_mult": 2.0, "trend_period": 100},
+        )
+
+        assert isinstance(strategy, TrendFiltered)
+        assert isinstance(strategy.inner, SmaCrossStrategy)
+        assert strategy.inner.fast == 3
+        assert strategy.trend_period == 100
+        assert strategy.name == "sma_cross_trend100"
+        assert strategy.warmup_period == 100
+
+    def test_create_sma_cross_trend_inner_defaults(self) -> None:
+        strategy = create_strategy("sma_cross_trend", {"trend_period": 200})
+
+        assert isinstance(strategy, TrendFiltered)
+        assert isinstance(strategy.inner, SmaCrossStrategy)
+        assert (strategy.inner.fast, strategy.inner.slow) == (20, 50)
+        assert strategy.warmup_period == 200
+
+    def test_create_sma_cross_trend_unknown_param(self) -> None:
+        with pytest.raises(ValueError, match="invalid strategy_params"):
+            create_strategy("sma_cross_trend", {"trend_peryod": 5})
