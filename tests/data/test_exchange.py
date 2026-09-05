@@ -1,4 +1,4 @@
-"""Tests for the exchange client wrapper."""
+"""Тесты обёртки биржевого клиента."""
 
 from __future__ import annotations
 

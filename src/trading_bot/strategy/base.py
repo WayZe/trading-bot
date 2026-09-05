@@ -1,9 +1,9 @@
-"""Strategy plugin contract.
+"""Контракт плагина стратегии.
 
-A strategy does not know who calls it — a backtest engine or a future live
-engine. It receives closed candles one by one via :meth:`Strategy.on_candle`
-and returns trading *intentions* (:class:`Signal`); execution is fully owned
-by the engine and its broker.
+Стратегия не знает, кто её вызывает — бэктест-движок или будущий live-движок.
+Она получает закрытые свечи по одной через :meth:`Strategy.on_candle` и
+возвращает торговые *намерения* (:class:`Signal`); исполнение полностью
+принадлежит движку и его брокеру.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import pandas as pd
 
 
 class SignalKind(StrEnum):
-    """Kind of trading intention emitted by a strategy."""
+    """Вид торгового намерения, выдаваемого стратегией."""
 
     LONG_ENTRY = "long_entry"
     LONG_EXIT = "long_exit"
@@ -24,17 +24,17 @@ class SignalKind(StrEnum):
 
 @dataclass(frozen=True)
 class Signal:
-    """A trading intention computed from closed candles.
+    """Торговое намерение, вычисленное по закрытым свечам.
 
     Attributes:
-        kind: what the strategy wants to do.
-        reason: human-readable explanation (used in trade records and logs).
-        stop_loss: optional stop level attached to an entry, expressed
-            against the signal candle's close; the engine re-anchors the
-            distance to the actual entry fill price and uses it for intrabar
-            stop checks while the position is open.
-        take_profit: optional take-profit price attached to an entry
-            (re-anchored to the fill price the same way as ``stop_loss``).
+        kind: что стратегия хочет сделать.
+        reason: человекочитаемое пояснение (попадает в записи сделок и логи).
+        stop_loss: необязательный уровень стопа, приложенный к входу и
+            выраженный относительно close сигнальной свечи; движок переносит
+            дистанцию на фактическую цену исполнения входа и проверяет уровень
+            внутри свечи, пока позиция открыта.
+        take_profit: необязательная цена тейк-профита, приложенная к входу
+            (переякоривается на цену исполнения так же, как ``stop_loss``).
     """
 
     kind: SignalKind
@@ -45,15 +45,15 @@ class Signal:
 
 @dataclass(frozen=True)
 class Fill:
-    """A confirmed execution reported back to the strategy.
+    """Подтверждённое исполнение, сообщаемое стратегии обратно.
 
     Attributes:
-        side: ``"buy"`` or ``"sell"``.
-        price: actual execution price (already includes slippage).
-        quantity: executed quantity in base currency.
-        timestamp: candle timestamp of the execution.
-        fee: fee paid for this fill, in quote currency.
-        reason: the reason carried from the originating signal.
+        side: ``"buy"`` или ``"sell"``.
+        price: фактическая цена исполнения (уже включает проскальзывание).
+        quantity: исполненный объём в базовой валюте.
+        timestamp: метка времени свечи, в которой произошло исполнение.
+        fee: комиссия за это исполнение в котируемой валюте.
+        reason: причина, перенесённая от исходного сигнала.
     """
 
     side: str
@@ -65,14 +65,14 @@ class Fill:
 
 
 class Strategy(ABC):
-    """Base class for trading strategies.
+    """Базовый класс торговых стратегий.
 
-    Contract:
-    - ``candles`` passed to :meth:`on_candle` is the whole history up to and
-      including the current **closed** candle;
-    - the strategy must not mutate the dataframe and must not look ahead;
-    - state must be resettable via :meth:`reset` so the same instance can be
-      used for repeated runs.
+    Контракт:
+    - ``candles``, переданный в :meth:`on_candle`, — вся история до текущей
+      **закрытой** свечи включительно;
+    - стратегия не должна мутировать фрейм и не должна заглядывать в будущее;
+    - состояние должно сбрасываться через :meth:`reset`, чтобы один и тот же
+      экземпляр можно было использовать для повторных прогонов.
     """
 
     name: str = "base"
@@ -80,17 +80,18 @@ class Strategy(ABC):
     @property
     @abstractmethod
     def warmup_period(self) -> int:
-        """Number of initial candles the strategy needs before it can signal."""
+        """Число начальных свечей, которое стратегии нужно до выдачи сигналов."""
 
     @abstractmethod
     def on_candle(self, candles: pd.DataFrame) -> list[Signal]:
-        """Process the closed candles history and return trading intentions."""
+        """Обработать историю закрытых свечей и вернуть торговые намерения."""
 
-    def on_fill(self, fill: Fill) -> None:  # noqa: B027 (intentional optional hook)
-        """Hook called by the engine after an order fills (no-op by default).
+    def on_fill(self, fill: Fill) -> None:  # noqa: B027 (намеренно опциональный хук)
+        """Хук, вызываемый движком после исполнения ордера (по умолчанию no-op).
 
-        Lets the strategy track actual entry prices (e.g. for stop tracking).
+        Позволяет стратегии отслеживать фактические цены входа (например,
+        для ведения стопа).
         """
 
-    def reset(self) -> None:  # noqa: B027 (intentional optional hook)
-        """Reset internal state for a fresh run (no-op by default)."""
+    def reset(self) -> None:  # noqa: B027 (намеренно опциональный хук)
+        """Сбросить внутреннее состояние для нового прогона (по умолчанию no-op)."""

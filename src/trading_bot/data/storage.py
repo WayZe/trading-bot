@@ -1,11 +1,12 @@
-"""Local Parquet storage for OHLCV candles.
+"""Локальное Parquet-хранилище OHLCV-свечей.
 
-Canonical Parquet schema (one row per candle):
+Каноничная Parquet-схема (одна строка на свечу):
 
 - ``timestamp``: ``datetime64[ms, UTC]``
 - ``open``, ``high``, ``low``, ``close``, ``volume``: ``float64``
 
-Invariants: rows are sorted by ``timestamp`` and contain no duplicate timestamps.
+Инварианты: строки отсортированы по ``timestamp`` и не содержат
+дубликатов меток времени.
 """
 
 from __future__ import annotations
@@ -26,11 +27,11 @@ _MAX_GAP_MESSAGES = 10
 
 
 def symbol_to_slug(symbol: str) -> str:
-    """Convert a ccxt symbol to a filesystem-safe slug (``BTC/USDT`` -> ``BTC_USDT``).
+    """Перевести символ ccxt в безопасный для файловой системы слаг (``BTC/USDT`` -> ``BTC_USDT``).
 
     Raises:
-        ValueError: if the symbol is empty or contains empty / ``..``
-            components — such slugs could escape the storage directory.
+        ValueError: если символ пуст или содержит пустые компоненты / ``..`` —
+            такие слаги могли бы выйти за пределы каталога хранилища.
     """
     parts = symbol.split("/")
     if any(part in ("", "..") for part in parts):
@@ -41,10 +42,10 @@ def symbol_to_slug(symbol: str) -> str:
 
 
 def normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
-    """Return a copy of ``df`` in the canonical schema.
+    """Вернуть копию ``df`` в каноничной схеме.
 
-    Ensures the column order and dtypes, drops duplicate timestamps
-    (keeping the last occurrence), and sorts by timestamp.
+    Гарантирует порядок колонок и типы данных, удаляет дубликаты меток
+    времени (оставляя последнее вхождение) и сортирует по timestamp.
     """
     missing = [col for col in OHLCV_COLUMNS if col not in df.columns]
     if missing:
@@ -58,12 +59,12 @@ def normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def find_gaps(df: pd.DataFrame, timeframe: str) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
-    """Find gaps between consecutive candles.
+    """Найти гэпы между соседними свечами.
 
-    Returns a list of ``(before, after)`` pairs where a whole timeframe step
-    or more is missing between the ``before`` candle and the ``after`` candle.
-    The input does not need to be sorted; only consecutive timestamps in
-    sorted order are compared.
+    Возвращает список пар ``(before, after)``, где между свечой ``before``
+    и свечой ``after`` пропущен один шаг таймфрейма или больше. Вход не
+    обязан быть отсортированным; сравниваются только соседние метки времени
+    в отсортированном порядке.
     """
     if len(df) < 2:
         return []
@@ -75,10 +76,11 @@ def find_gaps(df: pd.DataFrame, timeframe: str) -> list[tuple[pd.Timestamp, pd.T
 
 
 def validate_ohlcv(df: pd.DataFrame, timeframe: str) -> list[str]:
-    """Validate an OHLCV dataframe against the storage invariants.
+    """Проверить OHLCV-фрейм на соответствие инвариантам хранилища.
 
-    Returns a list of human-readable problems; an empty list means the data
-    is valid. Gap problems are reported as ``"gap from X to Y"`` entries.
+    Возвращает список человекочитаемых проблем; пустой список означает, что
+    данные валидны. Проблемы с гэпами сообщаются записями вида
+    ``"gap from X to Y"``.
     """
     if df.empty:
         return []
@@ -111,7 +113,7 @@ def validate_ohlcv(df: pd.DataFrame, timeframe: str) -> list[str]:
 def _add_mask_problem(
     problems: list[str], ts: pd.Series, mask: pd.Series, description: str
 ) -> None:
-    """Append one aggregated problem entry for rows matching ``mask``."""
+    """Добавить одну агрегированную запись о проблеме для строк, где истинен ``mask``."""
     mask = mask.fillna(False)
     count = int(mask.sum())
     if count:
@@ -120,7 +122,7 @@ def _add_mask_problem(
 
 
 def _interval_problems(df: pd.DataFrame, timeframe: str) -> list[str]:
-    """Report gaps and irregular (too short) intervals between candles."""
+    """Сообщить о гэпах и нерегулярных (слишком коротких) интервалах между свечами."""
     tf = pd.Timedelta(milliseconds=timeframe_to_ms(timeframe))
     zero = pd.Timedelta(0)
     ts = df["timestamp"].sort_values()
@@ -152,27 +154,27 @@ def _interval_problems(df: pd.DataFrame, timeframe: str) -> list[str]:
 
 
 class CandleStorage:
-    """Parquet-backed candle storage rooted at ``root``.
+    """Хранилище свечей на Parquet с корнем в ``root``.
 
-    Files are addressed as ``{root}/{exchange}/{SYMBOL_SLUG}/{timeframe}.parquet``.
+    Файлы адресуются как ``{root}/{exchange}/{SYMBOL_SLUG}/{timeframe}.parquet``.
     """
 
     def __init__(self, root: Path | str) -> None:
         self.root = Path(root)
 
     def path_for(self, exchange: str, symbol: str, timeframe: str) -> Path:
-        """Return the Parquet path for the given exchange/symbol/timeframe."""
+        """Вернуть путь к Parquet для заданной связки биржа/символ/таймфрейм."""
         return self.root / exchange / symbol_to_slug(symbol) / f"{timeframe}.parquet"
 
     def load(self, exchange: str, symbol: str, timeframe: str) -> pd.DataFrame | None:
-        """Load candles from storage; return ``None`` if the file does not exist."""
+        """Загрузить свечи из хранилища; вернуть ``None``, если файл не существует."""
         path = self.path_for(exchange, symbol, timeframe)
         if not path.exists():
             return None
         return pd.read_parquet(path, engine="pyarrow")
 
     def save(self, exchange: str, symbol: str, timeframe: str, df: pd.DataFrame) -> None:
-        """Atomically write candles: normalize, write to a temp file, then rename."""
+        """Атомарно записать свечи: нормализовать, записать во временный файл, переименовать."""
         path = self.path_for(exchange, symbol, timeframe)
         path.parent.mkdir(parents=True, exist_ok=True)
         normalized = normalize_ohlcv(df)
@@ -183,11 +185,11 @@ class CandleStorage:
     def append(
         self, exchange: str, symbol: str, timeframe: str, new_df: pd.DataFrame
     ) -> pd.DataFrame:
-        """Merge ``new_df`` into the stored candles and save the result.
+        """Дописать ``new_df`` к сохранённым свечам и сохранить результат.
 
-        Rows with duplicate timestamps are resolved in favour of ``new_df``
-        (useful for refreshing the still-open last candle). Returns the merged
-        dataframe.
+        Строки с дублирующимися метками времени разрешаются в пользу
+        ``new_df`` (полезно для обновления последней ещё формирующейся
+        свечи). Возвращает объединённый фрейм.
         """
         existing = self.load(exchange, symbol, timeframe)
         if existing is None or existing.empty:

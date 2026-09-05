@@ -1,1 +1,1 @@
-"""Data layer: exchange access, history downloading, local storage."""
+"""Слой данных: доступ к бирже, загрузка истории, локальное хранилище."""

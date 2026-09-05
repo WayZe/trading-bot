@@ -1,4 +1,4 @@
-"""Tests for report plots (Agg backend, no display required)."""
+"""Тесты графиков отчётов (backend Agg, дисплей не требуется)."""
 
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ def test_plot_equity_with_benchmark_overlay(tmp_path: Path, monkeypatch) -> None
         [10_000.0 + 20.0 * i for i in range(50)], index=index, name="equity"
     )
 
-    # plot_equity closes its figure; keep it open to inspect the drawn lines.
+    # plot_equity закрывает свою фигуру; оставляем её открытой, чтобы осмотреть линии.
     monkeypatch.setattr(plots.plt, "close", lambda *args, **kwargs: None)
     try:
         plot_equity(make_equity(), path, benchmark=benchmark)

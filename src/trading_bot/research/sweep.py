@@ -1,4 +1,4 @@
-"""Parameter-grid sweeps over the backtest engine (pure functions, no I/O)."""
+"""Sweep по сетке параметров поверх бэктест-движка (чистые функции, без I/O)."""
 
 from __future__ import annotations
 
@@ -16,10 +16,11 @@ from trading_bot.strategy import create_strategy
 
 logger = logging.getLogger(__name__)
 
-# Safety cap: a sweep is an interactive research tool, not a batch farm.
+# Предохранительный потолок: sweep — интерактивный исследовательский
+# инструмент, а не батч-ферма.
 MAX_COMBINATIONS = 200
 
-# Metric columns of a sweep result row (after the parameter columns).
+# Колонки метрик в строке результата sweep (после колонок параметров).
 METRIC_COLUMNS = (
     "total_return_pct",
     "cagr_pct",
@@ -33,10 +34,10 @@ METRIC_COLUMNS = (
 
 
 def expand_grid(param_grid: dict[str, list]) -> list[dict]:
-    """Expand a parameter grid into all combinations (Cartesian product).
+    """Развернуть сетку параметров во все комбинации (декартово произведение).
 
-    An empty grid yields a single empty combination ``[{}]`` — one run with
-    the base parameters.
+    Пустая сетка даёт единственную пустую комбинацию ``[{}]`` — один прогон
+    с базовыми параметрами.
     """
     if not param_grid:
         return [{}]
@@ -48,13 +49,13 @@ def expand_grid(param_grid: dict[str, list]) -> list[dict]:
 
 
 def slice_candles(candles: pd.DataFrame, cfg: BacktestConfig) -> pd.DataFrame:
-    """Keep candles with ``cfg.start <= timestamp < cfg.end``.
+    """Оставить свечи с ``cfg.start <= timestamp < cfg.end``.
 
-    Shared by the CLI backtest and research sweeps so both run over exactly
-    the same period for a given config.
+    Общая для CLI backtest и research sweep, чтобы оба гонялись ровно по
+    одному периоду при одном и том же конфиге.
 
     Raises:
-        ValueError: if ``candles`` is empty.
+        ValueError: если ``candles`` пуст.
     """
     if candles.empty:
         raise ValueError("no candles to slice: the dataset is empty")
@@ -77,28 +78,27 @@ def run_sweep(
     param_grid: dict[str, list],
     candles: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Run a backtest for every parameter combination in ``param_grid``.
+    """Прогнать бэктест для каждой комбинации параметров из ``param_grid``.
 
-    Each combination overrides ``base_config.strategy_params``; everything
-    else (period, fees, slippage, risk limits, start cash) comes from
-    ``base_config`` via :func:`build_engine`. The candles are sliced to the
-    config period first (same semantics as the CLI backtest) and validated
-    once before the combination loop.
+    Каждая комбинация переопределяет ``base_config.strategy_params``; всё
+    остальное (период, комиссии, проскальзывание, лимиты риска, стартовый
+    капитал) берётся из ``base_config`` через :func:`build_engine`. Свечи
+    сначала срезаются до периода конфига (та же семантика, что у CLI
+    backtest) и валидируются один раз перед циклом по комбинациям.
 
-    A combination that fails to build or run (e.g. ``fast >= slow``) does not
-    abort the sweep: any exception is caught, logged with its traceback at
-    debug level, and the row carries a brief error text in ``error`` with NaN
-    metrics.
+    Комбинация, которая не собирается или не выполняется (например,
+    ``fast >= slow``), не прерывает sweep: любое исключение ловится,
+    логируется с трейсбеком на уровне debug, а строка несёт краткий текст
+    ошибки в ``error`` и NaN в метриках.
 
     Returns:
-        One row per combination: the combination parameters as separate
-        columns, then :data:`METRIC_COLUMNS`, then ``error`` (``None`` when
-        the run succeeded).
+        Одна строка на комбинацию: параметры комбинации отдельными колонками,
+        затем :data:`METRIC_COLUMNS`, затем ``error`` (``None`` при успехе).
 
     Raises:
-        ValueError: if the grid expands to more than :data:`MAX_COMBINATIONS`
-            combinations, ``candles`` is empty, or no candles remain after
-            the period slice (including invalid candle data).
+        ValueError: если сетка разворачивается больше чем в
+            :data:`MAX_COMBINATIONS` комбинаций, ``candles`` пуст или после
+            среза по периоду не осталось свечей (включая невалидные данные).
     """
     n_combinations = math.prod(len(values) for values in param_grid.values()) or 1
     if n_combinations > MAX_COMBINATIONS:
@@ -121,7 +121,7 @@ def run_sweep(
 def _run_combination(
     base_config: BacktestConfig, combo: dict, candles: pd.DataFrame
 ) -> dict[str, Any]:
-    """Run one sweep combination; any failure becomes an ``error`` row."""
+    """Прогнать одну комбинацию sweep; любой сбой становится строкой с ``error``."""
     row: dict[str, Any] = dict(combo)
     params = {**base_config.strategy_params, **combo}
     try:
@@ -129,7 +129,7 @@ def _run_combination(
         engine = build_engine(base_config, strategy)
         result = engine.run(candles)
         metrics = compute_metrics(result.equity_curve, result.trades, base_config.timeframe)
-    except Exception as error:  # noqa: BLE001 - one bad combo must not kill the sweep
+    except Exception as error:  # noqa: BLE001 - одна плохая комбинация не должна убить sweep
         logger.debug("sweep combination %s failed", combo, exc_info=True)
         row.update(dict.fromkeys(METRIC_COLUMNS, math.nan))
         row["error"] = str(error) or type(error).__name__

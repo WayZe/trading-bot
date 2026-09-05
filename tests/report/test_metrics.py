@@ -1,4 +1,4 @@
-"""Tests for backtest metrics (hand-computed literals, no I/O)."""
+"""Тесты метрик бэктеста (посчитанные вручную литералы, без I/O)."""
 
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ def empty_trades() -> pd.DataFrame:
 
 class TestEquityMetrics:
     def test_total_return_and_max_drawdown_with_recovery(self) -> None:
-        # Peak 120 (day 1), trough 90 (day 2, dd -25%), recovered on day 4 (130).
+        # Пик 120 (день 1), дно 90 (день 2, dd -25%), восстановление в день 4 (130).
         equity = make_equity([100.0, 120.0, 90.0, 100.0, 130.0])
 
         metrics = compute_metrics(equity, empty_trades(), "1d")
@@ -65,7 +65,7 @@ class TestEquityMetrics:
         assert metrics.total_return_pct == pytest.approx(30.0)
         assert metrics.final_equity == pytest.approx(130.0)
         assert metrics.max_drawdown_pct == pytest.approx(-25.0)
-        assert metrics.max_drawdown_days == pytest.approx(3.0)  # day 1 -> day 4
+        assert metrics.max_drawdown_days == pytest.approx(3.0)  # день 1 -> день 4
         assert metrics.span_days == pytest.approx(4.0)
 
     def test_max_drawdown_without_recovery_runs_to_the_end(self) -> None:
@@ -74,7 +74,7 @@ class TestEquityMetrics:
         metrics = compute_metrics(equity, empty_trades(), "1d")
 
         assert metrics.max_drawdown_pct == pytest.approx(-25.0)
-        assert metrics.max_drawdown_days == pytest.approx(1.0)  # day 1 -> day 2
+        assert metrics.max_drawdown_days == pytest.approx(1.0)  # день 1 -> день 2
 
     def test_flat_equity_has_no_drawdown(self) -> None:
         metrics = compute_metrics(make_equity([100.0, 100.0, 100.0]), empty_trades(), "1d")
@@ -83,7 +83,7 @@ class TestEquityMetrics:
         assert metrics.max_drawdown_days is None
 
     def test_sharpe_hand_computed(self) -> None:
-        # Per-day returns: +0.1, -0.05, +0.1 -> mean 0.05, std(ddof=1)=sqrt(0.0075).
+        # Дневные доходности: +0.1, -0.05, +0.1 -> mean 0.05, std(ddof=1)=sqrt(0.0075).
         equity = make_equity([100.0, 110.0, 104.5, 114.95])
 
         metrics = compute_metrics(equity, empty_trades(), "1d")
@@ -99,10 +99,10 @@ class TestEquityMetrics:
             make_equity([100.0, 110.0, 121.0]), empty_trades(), "1d"
         )
 
-        assert metrics.sharpe is None  # zero dispersion
+        assert metrics.sharpe is None  # нулевая дисперсия
 
     def test_cagr_over_exactly_one_year(self) -> None:
-        # 2024-01-01 00:00 -> 2024-12-31 06:00 is exactly 365.25 days.
+        # 2024-01-01 00:00 -> 2024-12-31 06:00 — это ровно 365.25 дня.
         index = pd.DatetimeIndex(
             ["2024-01-01 00:00:00+00:00", "2024-12-31 06:00:00+00:00"], name="timestamp"
         )
@@ -115,13 +115,13 @@ class TestEquityMetrics:
         assert not metrics.short_span
 
     def test_cagr_extrapolated_for_short_span(self) -> None:
-        equity = make_equity([100.0, 110.0, 120.0])  # 2 days
+        equity = make_equity([100.0, 110.0, 120.0])  # 2 дня
 
         metrics = compute_metrics(equity, empty_trades(), "1d")
 
         assert metrics.short_span
         assert metrics.cagr_pct is not None
-        assert metrics.cagr_pct > metrics.total_return_pct  # 20% over 2 days
+        assert metrics.cagr_pct > metrics.total_return_pct  # 20% за 2 дня
 
     def test_single_point_equity(self) -> None:
         equity = pd.Series(
@@ -173,7 +173,7 @@ class TestTradeMetrics:
         assert metrics.profit_factor == math.inf
         assert metrics.winrate_pct == pytest.approx(100.0)
         assert metrics.avg_loss is None
-        assert metrics.worst_trade == pytest.approx(10.0)  # min pnl is a win
+        assert metrics.worst_trade == pytest.approx(10.0)  # минимальный pnl — выигрыш
 
     def test_profit_factor_when_only_losses(self) -> None:
         trades = make_trades(pnls=[-10.0, -20.0])
@@ -192,8 +192,8 @@ class TestTradeMetrics:
         assert metrics.avg_trade_pnl is None
         assert metrics.avg_holding_hours is None
         assert metrics.total_fees is None
-        # Equity metrics are still computed.
         assert metrics.total_return_pct == pytest.approx(5.0)
+        # Метрики эквити всё равно считаются.
 
     def test_total_fees_requires_fee_rate(self) -> None:
         trades = make_trades(pnls=[10.0])
@@ -203,7 +203,7 @@ class TestTradeMetrics:
         assert metrics.total_fees is None
 
     def test_sharpe_annualization_depends_on_timeframe(self) -> None:
-        # Same returns, finer timeframe -> more periods per year -> larger sharpe.
+        # Те же доходности, более мелкий таймфрейм -> больше периодов в год -> больше Шарп.
         trades = empty_trades()
         returns = [0.1, -0.05, 0.1]
         values = [100.0]
@@ -247,7 +247,7 @@ class TestBenchmark:
             benchmark_equity(close, 1000.0)
 
     def test_compute_benchmark_metrics_manual_series(self) -> None:
-        # Closes grow +10%, -5%, +10% -> per-day returns 0.1, -0.05, 0.1.
+        # Закрытия растут +10%, -5%, +10% -> дневные доходности 0.1, -0.05, 0.1.
         close = pd.Series(
             [100.0, 110.0, 104.5, 114.95],
             index=pd.date_range("2024-01-01", periods=4, freq="D", tz="UTC"),
@@ -258,7 +258,7 @@ class TestBenchmark:
         assert metrics.total_return_pct == pytest.approx(14.95)
         expected_sharpe = 0.05 / math.sqrt(0.0075) * math.sqrt(365.25)
         assert metrics.sharpe == pytest.approx(expected_sharpe)
-        assert metrics.max_drawdown_pct == pytest.approx(-5.0)  # 1045 vs peak 1100
+        assert metrics.max_drawdown_pct == pytest.approx(-5.0)  # 1045 против пика 1100
         years = 3.0 * MS_PER_DAY / YEAR_MS
         assert metrics.cagr_pct == pytest.approx((1.1495 ** (1.0 / years) - 1.0) * 100.0)
 

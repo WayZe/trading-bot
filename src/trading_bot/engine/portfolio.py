@@ -1,4 +1,4 @@
-"""Portfolio accounting: cash, a single long position, trade records."""
+"""Учёт портфеля: кэш, одна long-позиция, записи сделок."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class Position:
-    """An open long position."""
+    """Открытая long-позиция."""
 
     quantity: float
     entry_price: float
@@ -18,7 +18,7 @@ class Position:
 
 @dataclass(frozen=True)
 class TradeRecord:
-    """A closed round-trip trade."""
+    """Закрытая круговая сделка."""
 
     entry_ts: pd.Timestamp
     exit_ts: pd.Timestamp
@@ -34,9 +34,9 @@ TRADE_RECORD_FIELDS = list(TradeRecord.__dataclass_fields__)
 
 
 class Portfolio:
-    """Cash and position accounting with at most one open long position.
+    """Учёт кэша и позиции не более чем с одной открытой long-позицией.
 
-    All prices and money amounts are in quote currency (USDT).
+    Все цены и денежные суммы — в котируемой валюте (USDT).
     """
 
     def __init__(self, start_cash: float) -> None:
@@ -50,7 +50,7 @@ class Portfolio:
         self._entry_fee = 0.0
 
     def buy(self, quantity: float, price: float, fee: float, ts: pd.Timestamp) -> None:
-        """Open a position: ``cash -= quantity * price + fee``."""
+        """Открыть позицию: ``cash -= quantity * price + fee``."""
         if self.position is not None:
             raise RuntimeError("position already open: pyramiding is not supported in MVP")
         if quantity <= 0:
@@ -70,10 +70,10 @@ class Portfolio:
         reason_exit: str,
         reason_entry: str,
     ) -> None:
-        """Close the position: ``cash += quantity * price - fee``.
+        """Закрыть позицию: ``cash += quantity * price - fee``.
 
-        Records a :class:`TradeRecord` with net pnl (both entry and exit fees
-        included) and updates ``realized_pnl``.
+        Записывает :class:`TradeRecord` с чистым pnl (включая комиссию и
+        входа, и выхода) и обновляет ``realized_pnl``.
         """
         position = self.position
         if position is None:
@@ -104,7 +104,7 @@ class Portfolio:
         self._entry_fee = 0.0
 
     def equity(self, price: float) -> float:
-        """Mark-to-market equity: cash plus position value at ``price``."""
+        """Эквити по рынку: кэш плюс стоимость позиции по ``price``."""
         if self.position is not None:
             return self.cash + self.position.quantity * price
         return self.cash

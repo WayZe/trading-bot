@@ -1,4 +1,4 @@
-"""Tests for the simulated broker."""
+"""Тесты симулированного брокера."""
 
 from __future__ import annotations
 
@@ -60,8 +60,8 @@ class TestExecuteMarket:
             broker.execute_market("buy", 0.0, 100.0, TS, "r")
 
     def test_nan_price_ref_raises(self) -> None:
-        # NaN silently passes a `price_ref <= 0` check, so it needs an
-        # explicit isnan guard.
+        # NaN молча проходит проверку `price_ref <= 0`, поэтому нужен
+        # явный isnan-гвард.
         broker = SimulatedBroker(fee_rate=0.001, slippage_bps=5.0)
 
         with pytest.raises(ValueError, match="price_ref"):

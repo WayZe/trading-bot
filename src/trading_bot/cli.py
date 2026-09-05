@@ -1,4 +1,4 @@
-"""Typer CLI entry point."""
+"""Точка входа CLI на typer."""
 
 from __future__ import annotations
 
@@ -48,10 +48,10 @@ WALKFORWARD_DIR = REPORTS_DIR / "walkforward" / "last"
 
 RUN_FILES = ("equity.parquet", "trades.csv", "meta.json")
 
-# Grid names that would collide with sweep result columns.
+# Имена сеток, которые конфликтовали бы с колонками результата sweep.
 _RESERVED_PARAM_NAMES = frozenset(METRIC_COLUMNS) | {"error"}
-# Walkforward results.csv also carries window columns; the walkforward
-# command rejects both sets (see WINDOW_COLUMNS in research.walkforward).
+# results.csv у walkforward также несёт колонки окон; команда walkforward
+# отклоняет оба множества (см. WINDOW_COLUMNS в research.walkforward).
 _WALKFORWARD_RESERVED_PARAM_NAMES = _RESERVED_PARAM_NAMES | frozenset(WINDOW_COLUMNS)
 
 
@@ -65,7 +65,7 @@ def _setup_logging() -> None:
 
 @app.callback()
 def _root_callback() -> None:
-    """Configure console logging for all commands."""
+    """Настроить консольное логирование для всех команд."""
     _setup_logging()
 
 
@@ -88,7 +88,7 @@ def download(
         bool, typer.Option("--update", help="Incrementally update an existing dataset.")
     ] = False,
 ) -> None:
-    """Download historical candles from Bybit into local Parquet storage."""
+    """Загрузить исторические свечи с Bybit в локальное Parquet-хранилище."""
     storage = CandleStorage(DATA_ROOT)
     downloader = HistoryDownloader(ExchangeClient())
     path = storage.path_for(EXCHANGE_ID, symbol, timeframe)
@@ -126,7 +126,7 @@ def backtest(
         str | None, typer.Option(help="Переопределить таймфрейм из конфига, напр. 1h.")
     ] = None,
 ) -> None:
-    """Run a backtest over stored candles and save run artifacts."""
+    """Прогнать бэктест по сохранённым свечам и сохранить артефакты прогона."""
     cfg = _apply_overrides(load_config(config), symbol, timeframe)
     candles = _load_candles_for_period(cfg)
 
@@ -139,8 +139,8 @@ def backtest(
     engine = build_engine(cfg, strategy)
     result = engine.run(candles)
 
-    # Buy & hold benchmark over exactly the tested range (the candle slice
-    # fed to the engine), fully invested in the asset at the first close.
+    # Бенчмарк buy & hold ровно за тестируемый период (срез свечей, который
+    # получает движок), полностью инвестирован в актив по первому close.
     benchmark = benchmark_equity(candles.set_index("timestamp")["close"], cfg.start_cash)
 
     summary = _summary(cfg, result)
@@ -151,10 +151,10 @@ def backtest(
 def _apply_overrides(
     cfg: BacktestConfig, symbol: str | None, timeframe: str | None
 ) -> BacktestConfig:
-    """Apply CLI symbol/timeframe overrides (``None`` keeps the config value).
+    """Применить CLI-переопределения symbol/timeframe (``None`` сохраняет значение конфига).
 
-    The config is revalidated so a bad override (e.g. a malformed timeframe)
-    fails with the standard validation message.
+    Конфиг ревалидируется, чтобы плохое переопределение (например,
+    некорректный таймфрейм) падало со стандартным сообщением валидации.
     """
     updates: dict[str, str] = {}
     if symbol is not None:
@@ -171,17 +171,16 @@ def _apply_overrides(
 
 
 def _load_candles(cfg: BacktestConfig) -> pd.DataFrame:
-    """Load the raw candle dataset for the config symbol/timeframe.
+    """Загрузить сырой датасет свечей для symbol/timeframe из конфига.
 
-    Exits with a user-facing hint when the dataset is missing or the symbol
-    is not a valid ccxt pair. Shared by the ``backtest`` and ``sweep``
-    commands.
+    Выходит с пользовательской подсказкой, если датасет отсутствует или
+    символ — не валидная пара ccxt. Общая для команд ``backtest`` и ``sweep``.
     """
     storage = CandleStorage(DATA_ROOT)
     try:
         candles = storage.load(EXCHANGE_ID, cfg.symbol, cfg.timeframe)
     except ValueError as error:
-        # symbol_to_slug rejects symbols that could escape the storage root.
+        # symbol_to_slug отклоняет символы, которые могли бы выйти за корень хранилища.
         typer.echo(f"Некорректная пара {cfg.symbol!r}: {error}")
         raise typer.Exit(code=1) from error
     if candles is None:
@@ -196,10 +195,10 @@ def _load_candles(cfg: BacktestConfig) -> pd.DataFrame:
 
 
 def _load_candles_for_period(cfg: BacktestConfig) -> pd.DataFrame:
-    """Load candles for the config symbol/timeframe sliced to the period.
+    """Загрузить свечи для symbol/timeframe из конфига, срезанные до периода.
 
-    The ``sweep`` command loads via :func:`_load_candles` instead and lets
-    :func:`run_sweep` do the single slice.
+    Команда ``sweep`` вместо этого грузит через :func:`_load_candles` и
+    оставляет единственный срез :func:`run_sweep`.
     """
     candles = _load_candles(cfg)
     sliced = slice_candles(candles, cfg)
@@ -215,13 +214,13 @@ def _load_candles_for_period(cfg: BacktestConfig) -> pd.DataFrame:
 def _parse_grid(
     specs: list[str] | None, *, reserved: frozenset[str] = _RESERVED_PARAM_NAMES
 ) -> dict[str, list]:
-    """Parse repeated ``--param name=v1,v2,...`` options into a grid dict.
+    """Разобрать повторяемые опции ``--param name=v1,v2,...`` в словарь сетки.
 
-    Values are coerced: int-like strings become ``int``, other numeric
-    strings become ``float``, anything else stays a string. The strategy
-    constructor validates the final types and values. Names that collide
-    with result columns (metrics and ``error``; for walkforward also the
-    window columns) are rejected via ``reserved``.
+    Значения приводятся к типам: строки, похожие на int, становятся ``int``,
+    остальные числовые — ``float``, всё прочее остаётся строкой. Финальные
+    типы и значения проверяет конструктор стратегии. Имена, конфликтующие
+    с колонками результата (метрики и ``error``; для walkforward также
+    колонки окон), отбрасываются через ``reserved``.
     """
     if not specs:
         return {}
@@ -244,10 +243,10 @@ def _parse_grid(
 
 
 def _coerce_scalar(raw: str) -> int | float | str:
-    """Coerce a grid value: int-like strings to int, numeric to float, else str.
+    """Привести значение сетки к типу: int-подобные строки к int, числовые к float, иначе str.
 
-    Non-finite numbers (``nan``, ``inf``) are rejected: they would poison
-    every combination in the sweep instead of failing loudly once.
+    Не конечные числа (``nan``, ``inf``) отбрасываются: они отравили бы все
+    комбинации sweep вместо того, чтобы один раз громко упасть.
     """
     try:
         return int(raw)
@@ -310,7 +309,7 @@ def sweep(
 def _save_sweep_artifacts(
     cfg: BacktestConfig, grid: dict[str, list], results: pd.DataFrame
 ) -> None:
-    """Write results.csv and meta.json (config + grid) to reports/sweep/last/."""
+    """Записать results.csv и meta.json (конфиг + сетка) в reports/sweep/last/."""
     SWEEP_DIR.mkdir(parents=True, exist_ok=True)
     results.to_csv(SWEEP_DIR / "results.csv", index=False)
     meta = {
@@ -324,11 +323,11 @@ def _save_sweep_artifacts(
 
 
 def _print_sweep(cfg: BacktestConfig, grid: dict[str, list], results: pd.DataFrame) -> None:
-    """Print the sweep results table and the best row by total return.
+    """Напечатать таблицу результатов sweep и лучшую строку по полной доходности.
 
-    Grids with more than 20 rows show only the top-10 successful
-    combinations; failed combinations are always listed last with a
-    truncated error text.
+    Для сеток больше 20 строк показываются только топ-10 успешных
+    комбинаций; упавшие комбинации всегда выводятся в конце с укороченным
+    текстом ошибки.
     """
     table = Table(
         title=f"Sweep: {cfg.strategy} · {cfg.symbol} · {cfg.timeframe} "
@@ -389,12 +388,12 @@ def _print_sweep(cfg: BacktestConfig, grid: dict[str, list], results: pd.DataFra
 
 
 def _opt(value) -> float | None:
-    """Convert a possibly-NaN sweep cell to ``float | None``."""
+    """Перевести возможно-NaN ячейку sweep в ``float | None``."""
     return None if pd.isna(value) else float(value)
 
 
 def _sweep_cell(row: pd.Series, name: str) -> str:
-    """Format one sweep table cell (NaN as an em dash, floats with 2 dp)."""
+    """Отформатировать одну ячейку таблицы sweep (NaN как тире, float с 2 знаками)."""
     value = row[name]
     if pd.isna(value):
         return "—"
@@ -480,7 +479,7 @@ def walkforward(
 def _save_walkforward_artifacts(
     cfg: BacktestConfig, grid: dict[str, list], wf: WalkForwardResult
 ) -> None:
-    """Write results.csv, stitched_equity.parquet and meta.json to reports/walkforward/last/."""
+    """Записать results.csv, stitched_equity.parquet и meta.json в reports/walkforward/last/."""
     WALKFORWARD_DIR.mkdir(parents=True, exist_ok=True)
     wf.to_frame(grid).to_csv(WALKFORWARD_DIR / "results.csv", index=False)
     meta = {"config": cfg.model_dump(mode="json"), "walkforward": wf.meta}
@@ -491,7 +490,7 @@ def _save_walkforward_artifacts(
             WALKFORWARD_DIR / "stitched_equity.parquet", engine="pyarrow"
         )
     else:
-        # A fully failed run must not leave artifacts of the previous one behind.
+        # Полностью упавший прогон не должен оставлять артефакты предыдущего.
         for stale in ("stitched_equity.parquet", "walkforward.png"):
             (WALKFORWARD_DIR / stale).unlink(missing_ok=True)
     typer.echo(f"Результаты: {WALKFORWARD_DIR / 'results.csv'}")
@@ -503,7 +502,7 @@ def _print_walkforward(
     wf: WalkForwardResult,
     candles: pd.DataFrame,
 ) -> None:
-    """Print the per-window table plus the stitched-vs-buy-&-hold summary."""
+    """Напечатать таблицу по окнам плюс сводку stitched-кривой против buy & hold."""
     ok = [w for w in wf.windows if w.error is None]
     failed = [w for w in wf.windows if w.error is not None]
 
@@ -560,7 +559,7 @@ def _print_walkforward(
 def _print_walkforward_summary(
     cfg: BacktestConfig, wf: WalkForwardResult, candles: pd.DataFrame, ok: list
 ) -> None:
-    """Print stitched metrics vs buy & hold over the same OOS period + the plot."""
+    """Напечатать stitched-метрики против buy & hold за тот же OOS-период + график."""
     stitched = wf.stitched_equity
     wf_start, wf_end = ok[0].oos_start, ok[-1].oos_end
     closes = candles.loc[
@@ -614,7 +613,7 @@ def _print_walkforward_summary(
 
 
 def _fmt_wf_num(value: float | None, signed: bool = False) -> str:
-    """Format an optional walk-forward metric (2 dp, optional sign)."""
+    """Отформатировать необязательную walk-forward метрику (2 знака, опциональный знак)."""
     if value is None:
         return "—"
     return f"{value:+.2f}" if signed else f"{value:.2f}"
@@ -625,7 +624,7 @@ def _fmt_grid_param(params: dict | None, name: str) -> str:
 
 
 def _summary(cfg: BacktestConfig, result: BacktestResult) -> dict:
-    """Build a JSON-safe run summary."""
+    """Собрать JSON-совместимую сводку прогона."""
     final_equity = float(result.equity_curve.iloc[-1])
     position = result.open_position
     return {
@@ -680,7 +679,7 @@ def _print_summary(summary: dict) -> None:
 def _save_artifacts(
     result: BacktestResult, benchmark: pd.Series, cfg: BacktestConfig, summary: dict
 ) -> None:
-    """Write equity.parquet, trades.csv, benchmark.parquet and meta.json."""
+    """Записать equity.parquet, trades.csv, benchmark.parquet и meta.json."""
     LAST_RUN_DIR.mkdir(parents=True, exist_ok=True)
     result.equity_curve.to_frame().to_parquet(LAST_RUN_DIR / "equity.parquet", engine="pyarrow")
     benchmark.to_frame("equity").to_parquet(
@@ -728,7 +727,7 @@ def report(
 
 
 def _load_run(run_dir: Path) -> tuple[pd.Series, pd.DataFrame, dict]:
-    """Load run artifacts; exit with a hint when they are missing or broken."""
+    """Загрузить артефакты прогона; выйти с подсказкой, если их нет или они битые."""
     missing = [name for name in RUN_FILES if not (run_dir / name).is_file()]
     if missing:
         typer.echo(f"В каталоге {run_dir} нет артефактов прогона: {', '.join(missing)}.")
@@ -748,7 +747,7 @@ def _load_run(run_dir: Path) -> tuple[pd.Series, pd.DataFrame, dict]:
 
 
 def _load_benchmark(run_dir: Path) -> pd.Series | None:
-    """Load the optional buy & hold benchmark artifact (``None`` when absent)."""
+    """Загрузить опциональный артефакт бенчмарка buy & hold (``None``, если его нет)."""
     path = run_dir / "benchmark.parquet"
     if not path.is_file():
         return None
@@ -761,7 +760,7 @@ def _load_benchmark(run_dir: Path) -> pd.Series | None:
 
 
 def _resolve_candles(candles: Path | None, cfg: dict, timeframe: str) -> Path | None:
-    """Resolve the candles file for the trades plot, with hints when absent."""
+    """Разрешить файл свечей для графика сделок, с подсказками при отсутствии."""
     if candles is not None:
         if not candles.is_file():
             typer.echo(f"Файл свечей не найден: {candles}")
@@ -799,7 +798,7 @@ def _print_report(
     metrics: MetricsReport,
     benchmark: BenchmarkMetrics | None = None,
 ) -> None:
-    """Print the metrics table to the console (rich is a typer dependency)."""
+    """Напечатать таблицу метрик в консоль (rich — зависимость typer)."""
     console = Console()
     table = Table(
         title=f"Отчёт бэктеста: {cfg.get('strategy', '?')} · "
@@ -852,7 +851,7 @@ def _print_report(
 def _print_benchmark_comparison(
     console: Console, metrics: MetricsReport, benchmark: BenchmarkMetrics
 ) -> None:
-    """Print the strategy vs buy & hold comparison table."""
+    """Напечатать таблицу сравнения стратегии с buy & hold."""
     table = Table(title="Стратегия vs Buy & hold", title_justify="left")
     table.add_column("Метрика", no_wrap=True)
     table.add_column("Стратегия", justify="right")
@@ -881,5 +880,5 @@ def _print_benchmark_comparison(
 
 
 def main() -> None:
-    """Script entry point."""
+    """Точка входа скрипта."""
     app()

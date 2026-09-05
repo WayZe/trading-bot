@@ -1,1 +1,1 @@
-"""Backtest engine: event loop, simulated execution, portfolio accounting."""
+"""Бэктест-движок: событийный цикл, симуляция исполнения, учёт портфеля."""

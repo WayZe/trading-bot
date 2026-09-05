@@ -1,4 +1,4 @@
-"""Position sizing and order-size constraints."""
+"""Размер позиции и ограничения на объём ордера."""
 
 from __future__ import annotations
 
@@ -6,14 +6,14 @@ import math
 
 
 class RiskManager:
-    """Computes entry order sizes subject to capital and lot constraints.
+    """Вычисляет объёмы входных ордеров с учётом капитала и лотных ограничений.
 
     Attributes:
-        position_size_pct: fraction of equity allocated to a new position.
-        quantity_precision: number of decimal places the quantity is rounded
-            *down* to (exchange lot size).
-        min_notional: minimum order value (quantity * price) in quote
-            currency; smaller orders are rejected.
+        position_size_pct: доля капитала, выделяемая под новую позицию.
+        quantity_precision: число десятичных знаков, до которых объём
+            округляется *вниз* (размер лота на бирже).
+        min_notional: минимальная стоимость ордера (quantity * price) в
+            котируемой валюте; меньшие ордера отклоняются.
     """
 
     def __init__(
@@ -33,12 +33,12 @@ class RiskManager:
         self.min_notional = min_notional
 
     def position_quantity(self, equity: float, price: float) -> float:
-        """Return the entry quantity for the given equity and price.
+        """Вернуть объём входа для заданного капитала и цены.
 
-        The quantity is ``equity * position_size_pct / price`` rounded down to
-        ``quantity_precision`` decimals. If the resulting order value is below
-        ``min_notional`` (or the inputs are non-positive), returns ``0.0``
-        meaning "do not trade".
+        Объём равен ``equity * position_size_pct / price``, округлённому вниз
+        до ``quantity_precision`` знаков. Если стоимость ордера ниже
+        ``min_notional`` (или входы неположительные), возвращается ``0.0`` —
+        то есть «не торговать».
         """
         if equity <= 0.0 or price <= 0.0:
             return 0.0

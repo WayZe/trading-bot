@@ -1,4 +1,4 @@
-"""Backtest reports: performance metrics and matplotlib plots."""
+"""Отчёты бэктеста: метрики производительности и графики matplotlib."""
 
 from trading_bot.report.metrics import (
     BenchmarkMetrics,

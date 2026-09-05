@@ -1,27 +1,28 @@
-"""Event-driven backtest engine.
+"""Событийный бэктест-движок.
 
-Per-candle loop (for candle ``i``):
+Цикл по свечам (для свечи ``i``):
 
-1. Execute the order queued on candle ``i - 1`` at ``open[i]`` via the broker
-   (signal on a closed candle, execution on the next open — no look-ahead).
-2. Check intrabar stop-loss / take-profit of the open position on candle
-   ``i``: a gap through the level fills at the open (conservative), the stop
-   has priority if both levels are hit in the same candle.
-3. Mark equity to market at ``close[i]``.
-4. Call ``strategy.on_candle(candles[:i+1])`` and queue resulting signals as
-   orders for the next open.
+1. Исполнить ордер, поставленный в очередь на свече ``i - 1``, по ``open[i]``
+   через брокера (сигнал по закрытой свече, исполнение по следующему open —
+   без заглядывания в будущее).
+2. Проверить интрабарные стоп-лосс/тейк-профит открытой позиции на свече
+   ``i``: гэп через уровень исполняется по open (консервативно); при
+   одновременном касании обоих уровней приоритет у стопа.
+3. Переоценить эквити по рынку на ``close[i]``.
+4. Вызвать ``strategy.on_candle(candles[:i+1])`` и поставить итоговые сигналы
+   в очередь как ордера на следующий open.
 
-The engine is the single owner of stop-loss/take-profit: the levels carried
-by an entry signal are *distances* defined relative to the signal candle's
-close, and after the entry fills they are re-anchored to the actual fill
-price (``active_stop = fill.price - (stop_ref_close - stop_loss)`` and
-``active_take_profit = fill.price + (take_profit - stop_ref_close)``). A
-non-positive distance after re-anchoring disables the level.
+Движок — единственный владелец стоп-лосс/тейк-профит: уровни, переносимые
+входным сигналом, — это *дистанции*, заданные относительно close сигнальной
+свечи; после исполнения входа они переякориваются на фактическую цену
+исполнения (``active_stop = fill.price - (stop_ref_close - stop_loss)`` и
+``active_take_profit = fill.price + (take_profit - stop_ref_close)``).
+Неположительная дистанция после переякоривания отключает уровень.
 
-Orders still pending after the last candle are never executed and are
-reported in ``BacktestResult.n_pending_unfilled``; an open position stays in
-``open_position`` (marked to market in the equity curve) and is not recorded
-as a trade.
+Ордера, оставшиеся в очереди после последней свечи, никогда не исполняются и
+отражаются в ``BacktestResult.n_pending_unfilled``; открытая позиция остаётся
+в ``open_position`` (переоценивается по рынку в кривой эквити) и не
+записывается как сделка.
 """
 
 from __future__ import annotations
@@ -51,15 +52,14 @@ REASON_TAKE_PROFIT = "take profit"
 
 
 def validate_candles(candles: pd.DataFrame) -> None:
-    """Validate the candle frame for the backtest engine.
+    """Проверить фрейм свечей для бэктест-движка.
 
-    Shared by :meth:`BacktestEngine.run` and the research sweep, which
-    validates its candles once before running the combinations.
+    Общая для :meth:`BacktestEngine.run` и research sweep, который
+    валидирует свечи один раз перед прогоном комбинаций.
 
     Raises:
-        ValueError: if the candles are empty, miss required columns, contain
-            NaN values in required columns, or violate the ``high >= low``
-            invariant.
+        ValueError: если свечи пусты, не хватает обязательных колонок, есть
+            NaN в обязательных колонках или нарушен инвариант ``high >= low``.
     """
     missing = [col for col in REQUIRED_COLUMNS if col not in candles.columns]
     if missing:
@@ -79,12 +79,12 @@ def validate_candles(candles: pd.DataFrame) -> None:
 def _reanchor_below(
     level: float | None, ref_close: float | None, fill_price: float
 ) -> float | None:
-    """Re-anchor a stop level onto the actual fill price.
+    """Переякорить уровень стопа на фактическую цену исполнения.
 
-    The strategy defines the stop distance relative to the signal candle's
-    close (``ref_close - level``); the engine transfers that distance onto the
-    actual entry price so the stop tracks what was really paid. A missing or
-    non-positive distance disables the level.
+    Стратегия задаёт дистанцию стопа относительно close сигнальной свечи
+    (``ref_close - level``); движок переносит эту дистанцию на фактическую
+    цену входа, чтобы стоп следовал за реально заплаченной ценой. Отсутствие
+    или неположительность дистанции отключает уровень.
     """
     if level is None or ref_close is None:
         return None
@@ -102,7 +102,7 @@ def _reanchor_below(
 def _reanchor_above(
     level: float | None, ref_close: float | None, fill_price: float
 ) -> float | None:
-    """Re-anchor a take-profit level onto the actual fill price (symmetric)."""
+    """Переякорить уровень тейк-профита на фактическую цену исполнения (симметрично)."""
     if level is None or ref_close is None:
         return None
     distance = level - ref_close
@@ -119,11 +119,11 @@ def _reanchor_above(
 
 @dataclass
 class _PendingOrder:
-    """An order queued by a signal, waiting for the next candle's open.
+    """Ордер, поставленный сигналом в очередь и ждущий open следующей свечи.
 
-    ``stop_loss`` / ``take_profit`` are the levels as computed by the strategy
-    against the signal candle's close (``stop_ref_close``); after the fill the
-    engine transfers their distances onto the actual execution price.
+    ``stop_loss`` / ``take_profit`` — уровни, вычисленные стратегией от
+    close сигнальной свечи (``stop_ref_close``); после исполнения движок
+    переносит их дистанции на фактическую цену исполнения.
     """
 
     side: str
@@ -136,7 +136,7 @@ class _PendingOrder:
 
 @dataclass
 class BacktestResult:
-    """Artifacts of a single backtest run."""
+    """Артефакты одного прогона бэктеста."""
 
     equity_curve: pd.Series
     trades: pd.DataFrame
@@ -148,7 +148,7 @@ class BacktestResult:
 
 
 class BacktestEngine:
-    """Runs a :class:`Strategy` over historical candles with simulated fills."""
+    """Прогоняет :class:`Strategy` по историческим свечам с симуляцией исполнения."""
 
     def __init__(
         self,
@@ -165,10 +165,10 @@ class BacktestEngine:
         self.config = config
 
     def run(self, candles: pd.DataFrame) -> BacktestResult:
-        """Run the event loop over ``candles`` and return the result.
+        """Прогнать событийный цикл по ``candles`` и вернуть результат.
 
         Raises:
-            ValueError: if the candles fail :func:`validate_candles`.
+            ValueError: если свечи не проходят :func:`validate_candles`.
         """
         validate_candles(candles)
 
@@ -199,7 +199,7 @@ class BacktestEngine:
         for i in range(n):
             ts = timestamps.iloc[i]
 
-            # 1. Execute the order queued on the previous candle at this open.
+            # 1. Исполнить ордер, поставленный на предыдущей свече, по этому open.
             if pending is not None:
                 order, pending = pending, None
                 if order.side == SIDE_BUY:
@@ -245,16 +245,16 @@ class BacktestEngine:
                         ts,
                     )
 
-            # 2. Intrabar stop-loss / take-profit on this candle.
+            # 2. Интрабарные стоп-лосс / тейк-профит на этой свече.
             if portfolio.position is not None:
                 position = portfolio.position
                 exit_price: float | None = None
                 exit_reason = ""
                 if active_stop is not None and lows[i] <= active_stop:
-                    exit_price = min(opens[i], active_stop)  # gap down -> fill at open
+                    exit_price = min(opens[i], active_stop)  # гэп вниз -> исполнение по open
                     exit_reason = REASON_STOP_LOSS
                 elif active_tp is not None and highs[i] >= active_tp:
-                    exit_price = max(opens[i], active_tp)  # gap up -> fill at open
+                    exit_price = max(opens[i], active_tp)  # гэп вверх -> исполнение по open
                     exit_reason = REASON_TAKE_PROFIT
                 if exit_price is not None:
                     fill = self.broker.execute_market(
@@ -279,10 +279,10 @@ class BacktestEngine:
                         ts,
                     )
 
-            # 3. Mark equity to market at the close.
+            # 3. Переоценить эквити по рынку на close.
             equity_values[i] = portfolio.equity(closes[i])
 
-            # 4. Let the strategy see the closed candle and queue orders.
+            # 4. Дать стратегии увидеть закрытую свечу и поставить ордера в очередь.
             if i >= warmup:
                 for signal in self.strategy.on_candle(candles.iloc[: i + 1]):
                     pending = self._queue_signal(signal, pending, portfolio, closes[i], i)
@@ -319,7 +319,7 @@ class BacktestEngine:
         close: float,
         index: int,
     ) -> _PendingOrder | None:
-        """Validate a signal against the portfolio state and queue an order."""
+        """Проверить сигнал на соответствие состоянию портфеля и поставить ордер в очередь."""
         if signal.kind is SignalKind.LONG_ENTRY:
             if portfolio.position is not None:
                 logger.debug("LONG_ENTRY at candle %d ignored: position already open", index)
@@ -362,12 +362,13 @@ class BacktestEngine:
 
 
 def build_engine(cfg: BacktestConfig, strategy: Strategy) -> BacktestEngine:
-    """Create a :class:`BacktestEngine` fully configured from ``cfg``.
+    """Создать :class:`BacktestEngine`, полностью сконфигурированный из ``cfg``.
 
-    Single place where the execution stack (risk limits, broker fees and
-    slippage, start cash) is wired from a :class:`BacktestConfig`; shared by
-    the CLI backtest and the research sweep. The config is attached to the
-    engine, so the resulting :class:`BacktestResult` carries it back.
+    Единственное место, где исполнительный стек (лимиты риска, комиссии и
+    проскальзывание брокера, стартовый капитал) собирается из
+    :class:`BacktestConfig`; общее для CLI backtest и research sweep. Конфиг
+    прикрепляется к движку, так что итоговый :class:`BacktestResult` несёт
+    его обратно.
     """
     return BacktestEngine(
         strategy=strategy,

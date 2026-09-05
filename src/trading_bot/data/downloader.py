@@ -1,4 +1,4 @@
-"""Historical OHLCV downloading with pagination, retries, and gap backfilling."""
+"""Загрузка исторических OHLCV с пагинацией, ретраями и заполнением гэпов."""
 
 from __future__ import annotations
 
@@ -25,21 +25,21 @@ BATCH_SIZE = 1000
 MAX_ATTEMPTS = 6
 MAX_BACKOFF_SECONDS = 16
 PROGRESS_EVERY_BATCHES = 10
-# RateLimitExceeded inherits from NetworkError in ccxt, so it is covered too.
+# RateLimitExceeded наследуется от NetworkError в ccxt, поэтому тоже покрыт.
 RETRYABLE_ERRORS: tuple[type[Exception], ...] = (ccxt.NetworkError,)
 
 
 def _now_ms() -> int:
-    """Current UTC time in milliseconds since the epoch."""
+    """Текущее время UTC в миллисекундах от эпохи."""
     return int(datetime.now(UTC).timestamp() * 1000)
 
 
 def _drop_open_candles(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
-    """Drop candles whose bucket is still open.
+    """Отбросить свечи, чей бакет ещё не закрыт.
 
-    A candle is closed iff ``timestamp + timeframe_ms <= now``; the
-    still-forming last candle must never enter the dataset (it would poison
-    both the gap validation and the backtest).
+    Свеча закрыта тогда и только тогда, когда ``timestamp + timeframe_ms <= now``:
+    последняя формирующаяся свеча никогда не должна попадать в датасет
+    (она отравила бы и валидацию гэпов, и бэктест).
     """
     tf_ms = timeframe_to_ms(timeframe)
     cutoff = pd.Timestamp(_now_ms(), unit="ms", tz="UTC")
@@ -53,7 +53,7 @@ def _drop_open_candles(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
 
 
 def _as_date(value: date | str, *, name: str, default: date | None = None) -> date:
-    """Coerce ``date | str`` into a ``date``; use ``default`` for missing values."""
+    """Привести ``date | str`` к ``date``; для отсутствующих значений использовать ``default``."""
     if value is None:
         if default is not None:
             return default
@@ -66,7 +66,7 @@ def _as_date(value: date | str, *, name: str, default: date | None = None) -> da
 
 
 def _date_to_ms(value: date) -> int:
-    """Convert a UTC calendar date to milliseconds since the epoch."""
+    """Перевести календарную дату UTC в миллисекунды от эпохи."""
     moment = datetime(value.year, value.month, value.day, tzinfo=UTC)
     return int(moment.timestamp() * 1000)
 
@@ -76,7 +76,7 @@ def _ms_to_iso(ms: int) -> str:
 
 
 def _rows_to_df(rows: list[list]) -> pd.DataFrame:
-    """Convert raw ``[ts_ms, o, h, l, c, v]`` rows to the canonical schema."""
+    """Перевести сырые строки ``[ts_ms, o, h, l, c, v]`` в каноничную схему."""
     df = pd.DataFrame(rows, columns=["timestamp_ms", *OHLCV_COLUMNS[1:]])
     df["timestamp"] = pd.to_datetime(df.pop("timestamp_ms"), unit="ms", utc=True).astype(
         "datetime64[ms, UTC]"
@@ -87,7 +87,7 @@ def _rows_to_df(rows: list[list]) -> pd.DataFrame:
 
 
 class HistoryDownloader:
-    """Download OHLCV history from the exchange with retry and validation."""
+    """Загрузка истории OHLCV с биржи с ретраями и валидацией."""
 
     def __init__(self, exchange: ExchangeClient) -> None:
         self.exchange = exchange
@@ -99,12 +99,13 @@ class HistoryDownloader:
         since: date | str,
         until: date | str | None = None,
     ) -> pd.DataFrame:
-        """Download candles for ``[since, until)`` (UTC dates).
+        """Загрузить свечи за ``[since, until)`` (даты UTC).
 
-        ``until`` defaults to the current UTC date. Candles whose bucket is
-        still open (``timestamp + timeframe > now``) are dropped: only closed
-        candles are returned. Raises ``ValueError`` if the exchange returns no
-        data at all or if validation fails even after gap backfilling.
+        ``until`` по умолчанию — текущая дата UTC. Свечи, чей бакет ещё
+        открыт (``timestamp + timeframe > now``), отбрасываются: возвращаются
+        только закрытые свечи. Бросает ``ValueError``, если биржа не вернула
+        вообще никаких данных или валидация не проходит даже после
+        заполнения гэпов.
         """
         since_date = _as_date(since, name="since")
         until_date = _as_date(until, name="until", default=datetime.now(UTC).date())
@@ -118,14 +119,14 @@ class HistoryDownloader:
     def update(
         self, symbol: str, timeframe: str, storage: CandleStorage
     ) -> pd.DataFrame:
-        """Fetch candles from the last stored one up to now and merge them.
+        """Дозагрузить свечи от последней сохранённой до текущего момента и влить их.
 
-        The last stored candle is re-fetched as well, because it may have been
-        written while still open; the still-open tail is dropped before
-        saving, so only closed candles ever reach the dataset. Raises
-        ``FileNotFoundError`` if there is no stored dataset yet (run a full
-        download first) and ``ValueError`` if validation fails after the
-        merge.
+        Последняя сохранённая свеча запрашивается тоже: она могла быть записана,
+        пока ещё была открытой; незакрытый хвост отбрасывается перед записью,
+        так что в датасет попадают только закрытые свечи. Бросает
+        ``FileNotFoundError``, если сохранённого датасета ещё нет (сначала
+        выполните полную загрузку), и ``ValueError``, если после слияния
+        не проходит валидация.
         """
         existing = storage.load(EXCHANGE_ID, symbol, timeframe)
         if existing is None or existing.empty:
@@ -181,7 +182,7 @@ class HistoryDownloader:
     def _paginate(
         self, symbol: str, timeframe: str, since_ms: int, until_ms: int
     ) -> list[list]:
-        """Fetch all candles in ``[since_ms, until_ms)`` page by page."""
+        """Получить все свечи за ``[since_ms, until_ms)`` постранично."""
         tf_ms = timeframe_to_ms(timeframe)
         rows: list[list] = []
         cursor = since_ms
@@ -217,7 +218,7 @@ class HistoryDownloader:
     def _fetch_with_retry(
         self, symbol: str, timeframe: str, since_ms: int, limit: int
     ) -> list[list]:
-        """Fetch one batch, retrying transient network errors with backoff."""
+        """Получить один батч, ретраями с backoff обрабатывая сетевые сбои."""
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
                 return self.exchange.fetch_ohlcv(
@@ -240,7 +241,7 @@ class HistoryDownloader:
     def _backfill_gaps(
         self, symbol: str, timeframe: str, df: pd.DataFrame, until_ms: int
     ) -> pd.DataFrame:
-        """Detect gaps and fetch the missing ranges in separate requests."""
+        """Обнаружить гэпы и дозапросить пропущенные диапазоны отдельными запросами."""
         tf_ms = timeframe_to_ms(timeframe)
         for _ in range(3):
             gaps = find_gaps(df, timeframe)

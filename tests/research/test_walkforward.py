@@ -1,4 +1,4 @@
-"""Tests for walk-forward analysis (pure functions, no I/O)."""
+"""Тесты walk-forward анализа (чистые функции, без I/O)."""
 
 from __future__ import annotations
 
@@ -31,9 +31,9 @@ def make_config(**overrides) -> BacktestConfig:
 
 
 def make_cyclic_candles(n: int = 480) -> pd.DataFrame:
-    """Candles with a sine close price so SMA crosses fire repeatedly.
+    """Свечи с синусоидальным close, чтобы SMA-пересечения срабатывали регулярно.
 
-    480 candles at 4h = 80 days; the sine period is 48 candles (8 days).
+    480 свечей по 4h = 80 дней; период синусоиды — 48 свечей (8 дней).
     """
     index = pd.date_range("2025-08-01", periods=n, freq="4h", tz="UTC")
     close = 100.0 + 10.0 * np.sin(np.arange(n) * 2.0 * math.pi / 48.0)
@@ -67,8 +67,8 @@ class TestPlanWindows:
             assert window.oos_end == self.START + (40 * (step + 1)) * DAY
             assert window.is_end == window.oos_start
         for previous, current in zip(windows, windows[1:], strict=False):
-            # the next IS starts where the previous OOS ended: the optimizer
-            # never sees a previous window's OOS data
+            # следующий IS начинается там, где закончился предыдущий OOS:
+            # оптимизатор никогда не видит OOS-данные предыдущего окна
             assert current.is_start == previous.oos_end
 
     def test_anchored_windows_share_the_first_start(self) -> None:
@@ -118,9 +118,9 @@ class TestRunWalkforward:
         assert len(wf.windows) == 4  # 20-day rolling blocks over 80 days
         expected = self._expected_best(candles, cfg, grid, wf.windows[0], "sharpe")
         assert wf.windows[0].best_params == {name: expected[name] for name in grid}
-        assert isinstance(wf.windows[0].best_params["fast"], int)  # plain scalars
+        assert isinstance(wf.windows[0].best_params["fast"], int)  # обычные скаляры
         assert wf.windows[0].is_objective == pytest.approx(float(expected["sharpe"]))
-        # every window must have produced OOS numbers
+        # каждое окно должно выдать OOS-числа
         assert all(w.error is None for w in wf.windows)
         assert all(w.oos_return_pct is not None for w in wf.windows)
 
@@ -147,7 +147,7 @@ class TestRunWalkforward:
         window,
         objective: str,
     ) -> pd.Series:
-        """Mirror the IS selection: best valid row of the IS slice by objective."""
+        """Зеркалирует IS-выбор: лучшая валидная строка IS-среза по objective."""
         frame = run_sweep(
             cfg.model_copy(
                 update={
@@ -173,12 +173,13 @@ class TestRunWalkforward:
         assert float(stitched.iloc[0]) == pytest.approx(1.0)
         growth = math.prod(1.0 + w.oos_return_pct / 100.0 for w in wf.windows)
         assert float(stitched.iloc[-1]) == pytest.approx(growth)
-        # concatenated OOS parts: monotonic unique index (gaps between blocks ok)
+        # конкатенация OOS-частей: монотонный уникальный индекс (разрывы между
+        # блоками допустимы)
         assert stitched.index.is_monotonic_increasing
         assert stitched.index.is_unique
 
     def test_single_window_single_combo_matches_direct_engine_run(self) -> None:
-        candles = make_cyclic_candles(48)  # 8 days at 4h
+        candles = make_cyclic_candles(48)  # 8 дней at 4h
         cfg = make_config()
 
         wf = run_walkforward(
@@ -189,7 +190,7 @@ class TestRunWalkforward:
         window = wf.windows[0]
         assert window.error is None
 
-        # direct OOS run with the same calls: lead-in slice, engine, OOS part
+        # прямой OOS-прогон с теми же вызовами: lead-in срез, движок, OOS-часть
         strategy = create_strategy(cfg.strategy, {**PARAMS, "fast": 3})
         lead_in = pd.Timedelta(
             milliseconds=strategy.warmup_period * timeframe_to_ms(cfg.timeframe)
@@ -219,14 +220,14 @@ class TestRunWalkforward:
         )
 
         window = wf.windows[0]
-        # stitched curve starts exactly at the first OOS candle: the warm-up
-        # part of the OOS slice is excluded from both the index and the value.
+        # сшитая кривая начинается ровно с первой OOS-свечи: разогревающая
+        # часть OOS-среза исключена и из индекса, и из значений.
         first_oos_ts = candles["timestamp"][
             candles["timestamp"] >= window.oos_start
         ].iloc[0]
         assert wf.stitched_equity.index[0] == first_oos_ts
         assert float(wf.stitched_equity.iloc[0]) == pytest.approx(1.0)
-        # trades only from the OOS part, none from the lead-in
+        # сделки только из OOS-части, никаких из lead-in
         if not wf.trades.empty:
             assert wf.trades["entry_ts"].min() >= window.oos_start
 
@@ -244,8 +245,8 @@ class TestRunWalkforward:
         assert wf.trades.empty
 
     def test_data_gap_in_is_window_fails_only_that_window(self) -> None:
-        candles = make_cyclic_candles()  # 80 days -> 4 rolling 10+10 windows
-        # drop the IS span of window 1 (days 20..30): a hole in the data
+        candles = make_cyclic_candles()  # 80 дней -> 4 rolling окна 10+10
+        # выбрасываем IS-отрезок окна 1 (дни 20..30): дыра в данных
         ts = candles["timestamp"]
         start = ts.iloc[0]
         hole = candles.loc[
@@ -265,7 +266,7 @@ class TestRunWalkforward:
         assert wf.windows[1].error == "no candles in IS window"
         assert wf.windows[1].best_params is None
         assert wf.windows[1].oos_return_pct is None
-        # every other window still ran to completion
+        # все остальные окна всё равно выполнились до конца
         assert all(w.error is None for i, w in enumerate(wf.windows) if i != 1)
         assert all(w.oos_return_pct is not None for i, w in enumerate(wf.windows) if i != 1)
         assert not wf.stitched_equity.empty
@@ -274,7 +275,7 @@ class TestRunWalkforward:
         candles = make_cyclic_candles()
         cfg = make_config()
         grid = {"fast": [3], "slow": [6]}
-        # plan once to learn the window whose IS sweep will blow up
+        # планируем один раз, чтобы узнать окно, чей IS-sweep упадёт
         planned = run_walkforward(candles, cfg, grid, is_days=10, oos_days=10)
         hole = planned.windows[1]
         real_run_sweep = run_sweep
@@ -294,20 +295,20 @@ class TestRunWalkforward:
         assert all(w.error is None for i, w in enumerate(wf.windows) if i != 1)
 
     def test_combination_cap_raises_instead_of_error_rows(self) -> None:
-        candles = make_cyclic_candles()  # planning fits, the cap check is up front
+        candles = make_cyclic_candles()  # планирование проходит, проверка потолка заранее
         grid = {"fast": list(range(15)), "slow": list(range(15))}  # 225 > 200
 
         with pytest.raises(ValueError, match="combinations"):
             run_walkforward(candles, make_config(), grid, is_days=10, oos_days=10)
 
     def test_window_count_above_limit_raises(self) -> None:
-        candles = make_cyclic_candles(1500)  # 250 days; planning only, no runs
+        candles = make_cyclic_candles(1500)  # 250 дней; только планирование, без прогонов
 
         with pytest.raises(ValueError, match="50"):
             run_walkforward(candles, make_config(), {"fast": [3]}, is_days=1, oos_days=1)
 
     def test_insufficient_data_raises(self) -> None:
-        candles = make_cyclic_candles(48)  # 8 days
+        candles = make_cyclic_candles(48)  # 8 дней
 
         with pytest.raises(ValueError, match="is_days=30"):
             run_walkforward(candles, make_config(), {"fast": [3]}, is_days=30, oos_days=30)

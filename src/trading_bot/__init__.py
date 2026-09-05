@@ -1,1 +1,1 @@
-"""Trading bot package: Bybit spot, swing strategies, backtest-first."""
+"""Пакет торгового бота: Bybit спот, свинг-стратегии, backtest-first."""

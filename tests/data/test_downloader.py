@@ -1,4 +1,4 @@
-"""Tests for the history downloader (offline, exchange is faked)."""
+"""Тесты загрузчика истории (офлайн, биржа подменена)."""
 
 from __future__ import annotations
 
@@ -12,11 +12,11 @@ from trading_bot.data.storage import CandleStorage, validate_ohlcv
 
 
 class FakeExchange:
-    """Emulates exchange-side OHLCV pagination.
+    """Эмулирует биржевую пагинацию OHLCV.
 
-    Behaves like a real exchange: returns up to ``limit`` candles with
-    timestamps ``>= since_ms``. A queue of exceptions can be injected to
-    simulate transient network failures.
+    Ведёт себя как настоящая биржа: возвращает до ``limit`` свечей с
+    метками времени ``>= since_ms``. Можно подать очередь исключений для
+    имитации преходящих сетевых сбоев.
     """
 
     def __init__(self, rows: list[list], errors: list[Exception] | None = None):
@@ -38,7 +38,7 @@ class FakeExchange:
 
 
 class GapExchange:
-    """Hides a range of candles on the first request and reveals them later."""
+    """Пряча диапазон свечей при первом запросе, показывает его позже."""
 
     def __init__(self, full_rows: list[list], hidden_rows: list[list]):
         self.full_rows = full_rows
@@ -61,7 +61,7 @@ class GapExchange:
 
 class TestPagination:
     def test_fetches_all_pages_with_correct_since(self) -> None:
-        rows = make_candles(2400)  # 2400 hours = exactly 100 days
+        rows = make_candles(2400)  # 2400 часов = ровно 100 дней
         exchange = FakeExchange(rows)
         downloader = HistoryDownloader(exchange)
 
@@ -70,7 +70,7 @@ class TestPagination:
         )
 
         assert len(df) == 2400
-        assert len(exchange.calls) == 3  # 1000 + 1000 + 400, no empty trailing call
+        assert len(exchange.calls) == 3  # 1000 + 1000 + 400, без пустого хвостового вызова
         assert exchange.calls[0] == BASE_MS
         assert exchange.calls[1] == rows[1000][0]
         assert exchange.calls[2] == rows[2000][0]
@@ -113,7 +113,7 @@ class TestRetry:
         df = downloader.download("BTC/USDT", "1h", since="2025-08-01", until="2025-08-02")
 
         assert len(df) == 5
-        # Exponential backoff: 1s after the first failure, 2s after the second.
+        # Экспоненциальный backoff: 1с после первой неудачи, 2с после второй.
         sleep.assert_has_calls([mocker.call(1), mocker.call(2)])
 
     def test_gives_up_after_max_attempts(self) -> None:
@@ -135,8 +135,8 @@ class TestGapBackfill:
 
         df = downloader.download("BTC/USDT", "1h", since="2025-08-01", until="2025-08-05")
 
-        # The main pass saw 91 candles (96 minus the 5 hidden, bounded by until);
-        # the backfill request must start at the first missing candle.
+        # Основной проход увидел 91 свечу (96 минус 5 спрятанных, ограничено until);
+        # запрос дозаполнения должен начаться с первой отсутствующей свечи.
         assert len(df) == 96
         assert len(exchange.calls) == 2
         assert exchange.calls[0] == BASE_MS
@@ -163,7 +163,7 @@ class TestUpdate:
         df = downloader.update("BTC/USDT", "1h", storage)
 
         assert len(df) == 80
-        # The last stored candle is re-fetched (it may have been still open).
+        # Последняя сохранённая свеча перезапрашивается (она могла быть ещё открытой).
         assert exchange.calls[0] == stored[-1][0]
         pd.testing.assert_frame_equal(storage.load("bybit", "BTC/USDT", "1h"), df)
 
@@ -175,8 +175,8 @@ class TestUpdate:
             downloader.update("BTC/USDT", "1h", storage)
 
     def test_open_tail_is_dropped_before_saving(self, tmp_path, mocker) -> None:
-        # now is inside the bucket of the candle at BASE + 50h: it and every
-        # later candle are still open and must not reach the dataset.
+        # now внутри бакета свечи на BASE + 50h: она и все последующие свечи
+        # ещё открыты и не должны попасть в датасет.
         mocker.patch(
             "trading_bot.data.downloader._now_ms",
             return_value=BASE_MS + 50 * HOUR_MS + HOUR_MS // 2,
@@ -189,7 +189,7 @@ class TestUpdate:
 
         df = downloader.update("BTC/USDT", "1h", storage)
 
-        # No *closed* candles beyond the stored 50: the dataset is unchanged.
+        # За сохранёнными 50 закрытых свечей нет: датасет не меняется.
         assert len(df) == 50
         pd.testing.assert_frame_equal(
             storage.load("bybit", "BTC/USDT", "1h"), stored_df
@@ -198,7 +198,7 @@ class TestUpdate:
     def test_validation_problems_after_update_raise(self, tmp_path) -> None:
         storage = CandleStorage(tmp_path)
         storage.save("bybit", "BTC/USDT", "1h", rows_to_df(make_candles(10)))
-        # The tail introduces a gap: candles 10-11 are missing, 12+ arrive.
+        # Хвост вносит гэп: свечи 10-11 отсутствуют, 12+ приходят.
         gappy = make_candles(20)[12:]
         downloader = HistoryDownloader(FakeExchange(gappy))
 
@@ -208,8 +208,8 @@ class TestUpdate:
 
 class TestOpenCandleFilter:
     def test_download_drops_candle_whose_bucket_is_still_open(self, mocker) -> None:
-        # now is inside the bucket of the last candle (BASE + 4h): it closes
-        # at BASE + 5h and must not be returned (and thus not saved).
+        # now внутри бакета последней свечи (BASE + 4h): она закроется в
+        # BASE + 5h и не должна возвращаться (а значит, и сохраняться).
         mocker.patch(
             "trading_bot.data.downloader._now_ms",
             return_value=BASE_MS + 4 * HOUR_MS + HOUR_MS // 2,
@@ -224,7 +224,7 @@ class TestOpenCandleFilter:
         assert last_ms == BASE_MS + 3 * HOUR_MS
 
     def test_download_closed_history_is_untouched(self, mocker) -> None:
-        # now is far beyond the last candle: nothing is dropped.
+        # now далеко за последней свечой: ничего не отбрасывается.
         mocker.patch(
             "trading_bot.data.downloader._now_ms",
             return_value=BASE_MS + 100 * HOUR_MS,
@@ -237,7 +237,7 @@ class TestOpenCandleFilter:
         assert len(df) == 5
 
     def test_download_with_only_open_candles_raises(self, mocker) -> None:
-        # The single available candle is still open: nothing closed to store.
+        # Единственная доступная свеча ещё открыта: закрытых для хранения нет.
         mocker.patch(
             "trading_bot.data.downloader._now_ms",
             return_value=BASE_MS + HOUR_MS // 2,

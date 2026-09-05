@@ -1,4 +1,4 @@
-"""SMA crossover strategy with an ATR-based stop."""
+"""Стратегия пересечения SMA со стопом на основе ATR."""
 
 from __future__ import annotations
 
@@ -15,19 +15,20 @@ REASON_CROSS_DOWN = "sma cross down"
 
 
 class SmaCrossStrategy(Strategy):
-    """Long-only strategy: enter when the fast SMA crosses above the slow SMA.
+    """Long-only стратегия: вход, когда быстрая SMA пересекает медленную снизу вверх.
 
-    Entry: ``fast[t] > slow[t]`` and ``fast[t-1] <= slow[t-1]``. The emitted
-    signal carries ``stop_loss = close[t] - atr_mult * ATR[t]`` — a stop
-    *distance* defined relative to the signal candle's close. The engine owns
-    the stop: after the entry fills it transfers that distance onto the
-    actual execution price and checks it intrabar.
+    Вход: ``fast[t] > slow[t]`` и ``fast[t-1] <= slow[t-1]``. Сигнал несёт
+    ``stop_loss = close[t] - atr_mult * ATR[t]`` — *дистанцию* стопа,
+    заданную относительно close сигнальной свечи. Стоп принадлежит движку:
+    после исполнения входа тот переносит дистанцию на фактическую цену
+    исполнения и проверяет уровень внутри свечи.
 
-    Exit: the fast SMA crosses back below the slow one. There is no separate
-    stop-breach exit here — the engine's intrabar stop is the only stop path.
+    Выход: быстрая SMA снова пересекает медленную сверху вниз. Отдельного
+    выхода по пробою стопа здесь нет — интрабарный стоп движка единственный
+    стоп-путь.
 
-    Indicators are recomputed on the growing candle slice and cached by the
-    slice length, which is cheap for the candle counts involved.
+    Индикаторы пересчитываются на растущем срезе свечей и кешируются по длине
+    среза, что дёшево при данных объёмах свечей.
     """
 
     name = "sma_cross"
@@ -96,7 +97,7 @@ class SmaCrossStrategy(Strategy):
         return []
 
     def on_fill(self, fill: Fill) -> None:
-        """Track whether a position is open (used to gate exit signals)."""
+        """Отслеживать, открыта ли позиция (используется для фильтра выходных сигналов)."""
         if fill.side == "buy":
             self._in_position = True
         elif fill.side == "sell":

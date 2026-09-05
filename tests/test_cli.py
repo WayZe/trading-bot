@@ -1,4 +1,4 @@
-"""Tests for the CLI application (offline; download needs the network)."""
+"""Тесты CLI-приложения (офлайн; download требует сеть)."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ runner = CliRunner()
 
 
 def _make_run_dir(tmp_path: Path, with_candles: bool = True, with_benchmark: bool = False) -> Path:
-    """Create a mini run directory (equity + trades + meta) in tmp_path."""
+    """Создать мини-каталог прогона (equity + trades + meta) в tmp_path."""
     run = tmp_path / "reports" / "last_run"
     run.mkdir(parents=True, exist_ok=True)
 
@@ -76,7 +76,7 @@ def test_report_builds_table_and_plots(tmp_path: Path, monkeypatch) -> None:
     assert "sma_cross · BTC/USDT · 4h" in result.output
     assert "Доходность" in result.output
     assert "Profit factor" in result.output
-    assert "Buy & hold" not in result.output  # no benchmark artifact
+    assert "Buy & hold" not in result.output  # артефакта бенчмарка нет
     equity_png = run / "equity.png"
     trades_png = run / "trades.png"
     assert equity_png.exists() and equity_png.stat().st_size > 0
@@ -98,7 +98,7 @@ def test_report_with_benchmark_shows_comparison(tmp_path: Path, monkeypatch) -> 
 
 
 def test_report_accepts_explicit_candles_path(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.chdir(tmp_path)  # no data/ here on purpose
+    monkeypatch.chdir(tmp_path)  # data/ здесь специально нет
     run = _make_run_dir(tmp_path, with_candles=False)
     candles = tmp_path / "candles.parquet"
     rows_to_df(make_candles(12)).to_parquet(candles, index=False)
@@ -149,14 +149,14 @@ def test_report_without_run_dir_fails_with_hint(tmp_path: Path, monkeypatch) -> 
 
 
 def _prepare_data(tmp_path: Path, n_candles: int = 60) -> Path:
-    """Save synthetic rising candles into tmp_path/data (the CLI data root)."""
+    """Сохранить синтетические растущие свечи в tmp_path/data (корень данных CLI)."""
     storage = CandleStorage(tmp_path / "data")
     storage.save("bybit", "BTC/USDT", "4h", rows_to_df(make_candles(n_candles)))
     return storage.path_for("bybit", "BTC/USDT", "4h")
 
 
 def _prepare_cyclic_data(tmp_path: Path, n_candles: int) -> Path:
-    """Save sine-close candles (SMA crosses fire) into tmp_path/data."""
+    """Сохранить свечи с синусоидальным close (SMA-пересечения срабатывают) в tmp_path/data."""
     index = pd.date_range("2025-08-01", periods=n_candles, freq="4h", tz="UTC")
     close = 100.0 + 10.0 * np.sin(np.arange(n_candles) * 2.0 * np.pi / 48.0)
     open_ = np.roll(close, 1)
@@ -208,7 +208,7 @@ def test_backtest_runs_and_writes_artifacts(tmp_path: Path, monkeypatch) -> None
     assert meta["summary"]["start_cash"] == 10_000.0
     assert meta["summary"]["n_trades"] >= 0
     benchmark = pd.read_parquet(last_run / "benchmark.parquet", engine="pyarrow")
-    assert benchmark["equity"].iloc[0] == 10_000.0  # start_cash at the first close
+    assert benchmark["equity"].iloc[0] == 10_000.0  # start_cash по первому close
 
 
 def test_backtest_without_data_fails_with_hint(tmp_path: Path, monkeypatch) -> None:
@@ -568,7 +568,7 @@ class TestDownloadSince:
 class TestWalkforward:
     def test_runs_and_writes_artifacts(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.chdir(tmp_path)
-        _prepare_cyclic_data(tmp_path, n_candles=540)  # 90 days at 4h
+        _prepare_cyclic_data(tmp_path, n_candles=540)  # 90 дней по 4h
         config = tmp_path / "backtest.yaml"
         config.write_text(SWEEP_CONFIG, encoding="utf-8")
 
@@ -596,7 +596,7 @@ class TestWalkforward:
 
         wf_dir = tmp_path / "reports" / "walkforward" / "last"
         results = pd.read_csv(wf_dir / "results.csv")
-        assert len(results) == 4  # 20-day rolling blocks over 90 days
+        assert len(results) == 4  # rolling блоки по 20 дней на протяжении 90 дней
         assert results["fast"].isin([3, 4]).all()
         assert results["error"].isna().all()
         assert "oos_return_pct" in results.columns
@@ -710,7 +710,7 @@ class TestWalkforward:
 
     def test_insufficient_data_fails_cleanly(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.chdir(tmp_path)
-        _prepare_cyclic_data(tmp_path, n_candles=48)  # 8 days at 4h
+        _prepare_cyclic_data(tmp_path, n_candles=48)  # 8 дней по 4h
         config = tmp_path / "backtest.yaml"
         config.write_text(SWEEP_CONFIG, encoding="utf-8")
 
@@ -793,7 +793,7 @@ class TestWalkforward:
         self, tmp_path: Path, monkeypatch
     ) -> None:
         monkeypatch.chdir(tmp_path)
-        _prepare_cyclic_data(tmp_path, n_candles=540)  # 90 days at 4h
+        _prepare_cyclic_data(tmp_path, n_candles=540)  # 90 дней по 4h
         config = tmp_path / "backtest.yaml"
         config.write_text(SWEEP_CONFIG, encoding="utf-8")
         argv = [
@@ -812,7 +812,7 @@ class TestWalkforward:
         assert (wf_dir / "stitched_equity.parquet").exists()
         assert (wf_dir / "walkforward.png").exists()
 
-        # same directory, now a fully failed run (all grid combos invalid)
+        # тот же каталог, теперь полностью упавший прогон (вся сетка невалидна)
         failed_run = runner.invoke(app, [*argv, "--param", "fast=10,20", "--param", "slow=6"])
         assert failed_run.exit_code == 0, failed_run.output
 

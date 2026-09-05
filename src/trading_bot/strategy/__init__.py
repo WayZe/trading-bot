@@ -1,4 +1,4 @@
-"""Strategy plugins and the strategy registry."""
+"""Плагины стратегий и реестр стратегий."""
 
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
 
 
 def create_strategy(name: str, params: dict | None = None) -> Strategy:
-    """Instantiate a strategy plugin by registry name.
+    """Создать экземпляр плагина стратегии по имени из реестра.
 
     Raises:
-        ValueError: if the name is unknown or the params do not match the
-            strategy constructor signature.
+        ValueError: если имя неизвестно или параметры не соответствуют
+            сигнатуре конструктора стратегии.
     """
     strategy_cls = STRATEGY_REGISTRY.get(name)
     if strategy_cls is None:

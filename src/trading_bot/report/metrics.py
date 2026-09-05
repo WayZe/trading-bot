@@ -1,4 +1,4 @@
-"""Performance metrics for backtest runs (pure functions, no I/O)."""
+"""Метрики производительности для бэктест-прогонов (чистые функции, без I/O)."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ import pandas as pd
 
 from trading_bot.data.exchange import timeframe_to_ms
 
-# A year in milliseconds (365.25 days): the shared time base for CAGR years
-# and Sharpe annualization.
+# Год в миллисекундах (365.25 дня): общая временная база для числа лет в CAGR
+# и аннуализации Шарпа.
 YEAR_MS = 365.25 * 24 * 60 * 60 * 1000
 MS_PER_DAY = 24 * 60 * 60 * 1000
 
@@ -21,33 +21,34 @@ _HOUR = pd.Timedelta(hours=1)
 
 @dataclass(frozen=True)
 class MetricsReport:
-    """Performance metrics of a single backtest run.
+    """Метрики производительности одного бэктест-прогона.
 
-    Equity metrics:
+    Метрики эквити:
         total_return_pct: ``(final / first - 1) * 100``.
-        final_equity: last equity value, in quote currency.
-        cagr_pct: annualized total return over ``span_days / 365.25`` years;
-            ``None`` when the curve has no time span (a single point).
-        sharpe: annualized Sharpe ratio of per-candle equity returns
-            (risk-free rate 0); ``None`` when return dispersion is zero
-            or undefined.
-        max_drawdown_pct: deepest peak-to-trough decline, in percent (<= 0).
-        max_drawdown_days: days from the peak of the deepest drawdown to its
-            recovery, or to the end of the curve if never recovered; ``None``
-            when the curve never drew down.
-        span_days: time span of the equity curve, in days.
+        final_equity: последнее значение эквити, в котируемой валюте.
+        cagr_pct: годовая (аннуализированная) доходность за
+            ``span_days / 365.25`` лет; ``None``, когда у кривой нет
+            временной протяжённости (одна точка).
+        sharpe: аннуализированный коэффициент Шарпа доходностей эквити
+            по свечам (безрисковая ставка 0); ``None``, когда дисперсия
+            доходностей нулевая или не определена.
+        max_drawdown_pct: наибольшее падение от пика до дна, в процентах (<= 0).
+        max_drawdown_days: дни от пика наибольшей просадки до её восстановления
+            либо до конца кривой, если восстановления не было; ``None``, когда
+            просадок не было вовсе.
+        span_days: временная протяжённость кривой эквити, в днях.
 
-    Trade metrics (all ``None`` when the run closed no trades):
-        n_trades: number of closed round-trip trades (always an int).
-        winrate_pct: share of trades with ``pnl > 0``.
-        profit_factor: gross profit / gross loss; ``inf`` when there are
-            no losing trades.
-        avg_trade_pnl, avg_win, avg_loss, best_trade, worst_trade: pnl
-            statistics in quote currency (``avg_win``/``avg_loss`` are
-            ``None`` when there are no wins/losses respectively).
-        avg_holding_hours: mean ``exit_ts - entry_ts`` in hours.
-        total_fees: estimated fees if a ``fee_rate`` was supplied (see
-            :func:`compute_metrics`), else ``None``.
+    Метрики сделок (все ``None``, если прогон не закрыл ни одной сделки):
+        n_trades: число закрытых круговых сделок (всегда int).
+        winrate_pct: доля сделок с ``pnl > 0``.
+        profit_factor: валовая прибыль / валовый убыток; ``inf``, когда
+            убыточных сделок нет.
+        avg_trade_pnl, avg_win, avg_loss, best_trade, worst_trade: статистика
+            pnl в котируемой валюте (``avg_win``/``avg_loss`` равны ``None``,
+            когда нет соответственно выигрышей/проигрышей).
+        avg_holding_hours: среднее ``exit_ts - entry_ts`` в часах.
+        total_fees: оценка комиссий, если передан ``fee_rate`` (см.
+            :func:`compute_metrics`), иначе ``None``.
     """
 
     total_return_pct: float
@@ -71,20 +72,22 @@ class MetricsReport:
 
     @property
     def short_span(self) -> bool:
-        """True when the run is shorter than a year (CAGR is extrapolated)."""
+        """True, когда прогон короче года (CAGR экстраполирован)."""
         return self.span_days * MS_PER_DAY < YEAR_MS
 
 
 @dataclass(frozen=True)
 class BenchmarkMetrics:
-    """Buy & hold benchmark metrics over the same period as a backtest.
+    """Метрики бенчмарка buy & hold за тот же период, что и бэктест.
 
     Attributes:
         total_return_pct: ``(final / first - 1) * 100``.
-        cagr_pct: annualized total return; ``None`` for a single-point curve.
-        sharpe: annualized Sharpe ratio of per-candle returns (risk-free
-            rate 0); ``None`` when the dispersion is zero or undefined.
-        max_drawdown_pct: deepest peak-to-trough decline, in percent (<= 0).
+        cagr_pct: годовая (аннуализированная) доходность; ``None`` для
+            кривой из одной точки.
+        sharpe: аннуализированный коэффициент Шарпа доходностей по свечам
+            (безрисковая ставка 0); ``None``, когда дисперсия нулевая
+            или не определена.
+        max_drawdown_pct: наибольшее падение от пика до дна, в процентах (<= 0).
     """
 
     total_return_pct: float
@@ -100,22 +103,24 @@ def compute_metrics(
     *,
     fee_rate: float | None = None,
 ) -> MetricsReport:
-    """Compute performance metrics from backtest artifacts.
+    """Вычислить метрики производительности по артефактам бэктеста.
 
     Args:
-        equity: mark-to-market equity curve indexed by candle timestamps.
-        trades: closed trades with the ``TradeRecord`` schema (``entry_ts``,
+        equity: кривая эквити по рынку, индексированная метками времени свечей.
+        trades: закрытые сделки со схемой ``TradeRecord`` (``entry_ts``,
             ``exit_ts``, ``entry_price``, ``exit_price``, ``quantity``,
-            ``pnl``, ...); may be empty.
-        timeframe: candle timeframe (``"15m"``, ``"4h"``, ``"1d"`` ...) used
-            to annualize Sharpe: periods per year = ``YEAR_MS / timeframe_ms``.
-        fee_rate: optional taker fee per side; when given, ``total_fees`` is
-            computed as ``fee_rate * sum(quantity * (entry_price +
-            exit_price))`` over the recorded fill prices (which already
-            include slippage, matching the broker's fee model).
+            ``pnl``, ...); может быть пустым.
+        timeframe: таймфрейм свечи (``"15m"``, ``"4h"``, ``"1d"`` ...),
+            используемый для аннуализации Шарпа:
+            периодов в год = ``YEAR_MS / timeframe_ms``.
+        fee_rate: необязательная taker-комиссия за сторону; если задана,
+            ``total_fees`` считается как ``fee_rate * sum(quantity *
+            (entry_price + exit_price))`` по записанным ценам исполнения
+            (они уже включают проскальзывание — совпадает с моделью
+            комиссий брокера).
 
     Raises:
-        ValueError: if the equity curve is empty or the timeframe is invalid.
+        ValueError: если кривая эквити пуста или таймфрейм некорректен.
     """
     if equity.empty:
         raise ValueError("equity curve is empty: nothing to report")
@@ -127,10 +132,11 @@ def compute_metrics(
 
 
 def _equity_metrics(equity: pd.Series, timeframe: str) -> dict[str, float | None]:
-    """Core equity-curve metrics shared by strategy and benchmark reports.
+    """Базовые метрики кривой эквити, общие для отчётов стратегии и бенчмарка.
 
-    Returns a dict with ``total_return_pct``, ``final_equity``, ``cagr_pct``,
-    ``sharpe``, ``max_drawdown_pct``, ``max_drawdown_days`` and ``span_days``.
+    Возвращает dict с ключами ``total_return_pct``, ``final_equity``,
+    ``cagr_pct``, ``sharpe``, ``max_drawdown_pct``, ``max_drawdown_days``
+    и ``span_days``.
     """
     values = equity.to_numpy(dtype="float64")
     start_equity = float(values[0])
@@ -167,19 +173,19 @@ def _equity_metrics(equity: pd.Series, timeframe: str) -> dict[str, float | None
 
 
 def benchmark_equity(close: pd.Series, start_cash: float) -> pd.Series:
-    """Build the buy & hold equity curve from candle closes.
+    """Построить кривую эквити buy & hold из закрытий свечей.
 
-    The full ``start_cash`` is invested at the first close; the curve is
-    ``start_cash * close / close[0]`` over the same index. Pure function.
+    Весь ``start_cash`` инвестируется по первому закрытию; кривая — это
+    ``start_cash * close / close[0]`` на том же индексе. Чистая функция.
 
-    The model is deliberately naive: a single entry at the first close that
-    pays no fees and no slippage. When comparing against a backtest that
-    does pay them, the benchmark is systematically flattered — treat the
-    comparison as an optimistic lower bound for buy & hold.
+    Модель нарочно наивная: разовая покупка по первому закрытию без комиссий
+    и проскальзывания. При сравнении с бэктестом, который их платит, бенчмарк
+    систематически в выигрыше — читайте сравнение как оптимистичную оценку
+    снизу для buy & hold.
 
     Raises:
-        ValueError: if ``close`` is empty, starts at zero, or its first
-            value is NaN.
+        ValueError: если ``close`` пуст, начинается с нуля или его первое
+            значение NaN.
     """
     if close.empty:
         raise ValueError("close series is empty: nothing to benchmark")
@@ -192,13 +198,13 @@ def benchmark_equity(close: pd.Series, start_cash: float) -> pd.Series:
 
 
 def compute_benchmark_metrics(equity: pd.Series, timeframe: str) -> BenchmarkMetrics:
-    """Compute buy & hold metrics from a benchmark equity curve.
+    """Вычислить метрики buy & hold по кривой эквити бенчмарка.
 
-    Reuses the same formulas as :func:`compute_metrics` (via the shared
-    equity helpers), without trade metrics.
+    Переиспользует те же формулы, что и :func:`compute_metrics` (через
+    общие хелперы эквити), без метрик сделок.
 
     Raises:
-        ValueError: if the equity curve is empty or the timeframe is invalid.
+        ValueError: если кривая эквити пуста или таймфрейм некорректен.
     """
     if equity.empty:
         raise ValueError("equity curve is empty: nothing to report")
@@ -212,11 +218,11 @@ def compute_benchmark_metrics(equity: pd.Series, timeframe: str) -> BenchmarkMet
 
 
 def _drawdown(equity: pd.Series, values: np.ndarray) -> tuple[float, float | None]:
-    """Return ``(max drawdown %, duration in days)`` of the deepest drawdown.
+    """Вернуть ``(макс. просадка %, длительность в днях)`` наибольшей просадки.
 
-    The duration spans from the peak preceding the deepest trough to the
-    first recovery to that peak (or to the end of the curve when the equity
-    never recovers).
+    Длительность считается от пика, предшествующего самому глубокому дну,
+    до первого восстановления до этого пика (или до конца кривой, если
+    эквити так и не восстановилось).
     """
     running_max = np.maximum.accumulate(values)
     drawdown = values / running_max - 1.0
@@ -236,7 +242,7 @@ def _drawdown(equity: pd.Series, values: np.ndarray) -> tuple[float, float | Non
 def _trade_metrics(
     trades: pd.DataFrame, *, fee_rate: float | None
 ) -> dict[str, float | int | None]:
-    """Compute trade-level metrics; every metric is ``None`` for 0 trades."""
+    """Посчитать метрики по сделкам; каждая метрика — ``None`` при нуле сделок."""
     n_trades = int(len(trades))
     if n_trades == 0:
         return {

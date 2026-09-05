@@ -1,7 +1,7 @@
-"""Matplotlib plots for backtest reports (Agg backend, no display needed).
+"""Графики matplotlib для отчётов бэктеста (backend Agg, дисплей не нужен).
 
-Labels are in Russian; the default matplotlib font (DejaVu Sans) covers
-Cyrillic, so no extra font setup is required.
+Подписи на русском; шрифт matplotlib по умолчанию (DejaVu Sans) покрывает
+кириллицу, так что дополнительная настройка шрифтов не требуется.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import matplotlib
 
-matplotlib.use("Agg")  # must run before pyplot is imported
+matplotlib.use("Agg")  # должно выполняться до импорта pyplot
 
 import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd  # noqa: E402
@@ -21,10 +21,10 @@ DPI = 150
 def plot_equity(
     equity: pd.Series, path: Path | str, benchmark: pd.Series | None = None
 ) -> None:
-    """Save the equity curve (top) with its drawdown in percent (bottom).
+    """Сохранить кривую эквити (сверху) с просадкой в процентах (снизу).
 
-    When ``benchmark`` is given, it is overlaid on the equity subplot as a
-    gray dashed line ("Buy & hold") and a legend is added.
+    Если передан ``benchmark``, он накладывается на график эквити серой
+    пунктирной линией ("Buy & hold") и добавляется легенда.
     """
     equity = equity.sort_index().astype("float64")
     drawdown = (equity / equity.cummax() - 1.0) * 100.0
@@ -66,12 +66,12 @@ def plot_equity(
 def plot_stitched_equity(
     stitched: pd.Series, path: Path | str, benchmark: pd.Series | None = None
 ) -> None:
-    """Save the stitched walk-forward curve (top) with its drawdown (bottom).
+    """Сохранить сшитую walk-forward кривую (сверху) с её просадкой (снизу).
 
-    Both curves are growth factors starting at 1.0 (the stitched OOS equity
-    and the buy & hold benchmark over the same period, normalized the same
-    way), so the ylabel is a multiple of the starting capital rather than
-    USDT. Same visual language as :func:`plot_equity`.
+    Обе кривые — коэффициенты роста, начинающиеся с 1.0 (сшитая OOS-кривая
+    эквити и бенчмарк buy & hold за тот же период, нормированные одинаково),
+    поэтому подпись оси Y — кратность стартового капитала, а не USDT.
+    Тот же визуальный язык, что у :func:`plot_equity`.
     """
     stitched = stitched.sort_index().astype("float64")
     drawdown = (stitched / stitched.cummax() - 1.0) * 100.0
@@ -115,10 +115,10 @@ def plot_stitched_equity(
 
 
 def plot_trades(candles: pd.DataFrame, trades: pd.DataFrame, path: Path | str) -> None:
-    """Save the close price with entry/exit markers over it.
+    """Сохранить график цены закрытия с маркерами входов/выходов поверх.
 
-    Entries are green up triangles, exits are red down triangles. An empty
-    ``trades`` dataframe produces a price-only chart.
+    Входы — зелёные треугольники вверх, выходы — красные треугольники вниз.
+    Пустой фрейм ``trades`` даёт график одной лишь цены.
     """
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(

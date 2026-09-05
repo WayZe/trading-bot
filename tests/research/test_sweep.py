@@ -1,4 +1,4 @@
-"""Tests for parameter-grid sweeps (pure functions, no I/O)."""
+"""Тесты sweep по сетке параметров (чистые функции, без I/O)."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ def make_candles_df(n: int = 60) -> pd.DataFrame:
 
 
 def make_cyclic_candles(n: int = 240) -> pd.DataFrame:
-    """Candles with a sine close price so SMA crosses fire in both directions."""
+    """Свечи с синусоидальным close, чтобы SMA-пересечения срабатывали в обе стороны."""
     index = pd.date_range("2025-08-01", periods=n, freq="4h", tz="UTC")
     close = 100.0 + 10.0 * np.sin(np.arange(n) * 2.0 * math.pi / 48.0)
     open_ = np.roll(close, 1)
@@ -80,12 +80,12 @@ class TestExpandGrid:
 
 class TestSliceCandles:
     def test_respects_start_and_end(self) -> None:
-        candles = make_candles_df(48)  # 48 x 4h from 2025-08-01
+        candles = make_candles_df(48)  # 48 x 4h с 2025-08-01
         cfg = BacktestConfig(start="2025-08-01", end="2025-08-04")
 
         sliced = slice_candles(candles, cfg)
 
-        assert len(sliced) == 18  # Aug 1 00:00 .. Aug 3 20:00, end exclusive
+        assert len(sliced) == 18  # 1 авг 00:00 .. 3 авг 20:00, end не включается
         assert sliced["timestamp"].iloc[0] == pd.Timestamp("2025-08-01", tz="UTC")
         assert sliced["timestamp"].iloc[-1] == pd.Timestamp(
             "2025-08-03 20:00", tz="UTC"
@@ -121,7 +121,7 @@ class TestRunSweep:
         direct = self._direct_run(cfg, candles, dict(PARAMS))
 
         assert results.iloc[0]["error"] is None
-        assert direct.n_trades > 0  # the data must exercise actual trades
+        assert direct.n_trades > 0  # данные должны давать реальные сделки
         assert results.iloc[0]["total_return_pct"] == pytest.approx(direct.total_return_pct)
         assert results.iloc[0]["n_trades"] == direct.n_trades
         assert results.iloc[0]["sharpe"] == pytest.approx(direct.sharpe)
@@ -134,8 +134,9 @@ class TestRunSweep:
         results = run_sweep(cfg, {"slow": [6, 12]}, candles)
 
         assert len(results) == 2
-        # Each row must equal a direct run with its own combo value (the combo
-        # wins over the base slow=6), and the two runs must actually differ.
+        # Каждая строка должна совпадать с прямым прогоном своего значения
+        # комбинации (комбинация побеждает базовый slow=6), и два прогона
+        # должны реально различаться.
         direct_slow6 = self._direct_run(cfg, candles, dict(PARAMS))
         direct_slow12 = self._direct_run(cfg, candles, {**PARAMS, "slow": 12})
         assert results.iloc[0]["total_return_pct"] == pytest.approx(

@@ -1,4 +1,4 @@
-"""Tests for the SMA cross strategy on synthetic candle series."""
+"""Тесты стратегии SMA cross на синтетических рядах свечей."""
 
 from __future__ import annotations
 
@@ -10,18 +10,18 @@ from trading_bot.strategy import create_strategy
 from trading_bot.strategy.base import Fill, Signal, SignalKind
 from trading_bot.strategy.sma_cross import SmaCrossStrategy
 
-# Candles are built so that ATR is exactly 2.0 after its warmup:
-# high = close + 1, low = close - 1, and close steps of 0.5 keep every
-# True Range equal to 2. With atr_mult=2 the stop distance is exactly 4.0.
+# Свечи построены так, что ATR после прогрева равен ровно 2.0:
+# high = close + 1, low = close - 1, а шаги close по 0.5 удерживают каждый
+# истинный диапазон равным 2. При atr_mult=2 дистанция стопа равна ровно 4.0.
 SPREAD = 1.0
 ATR_VALUE = 2.0
 
 UP_CROSS_CLOSES = [
-    100.0, 99.5, 99.0, 98.5, 98.0, 97.5,  # decline: fast below slow
-    98.0, 98.5, 99.0, 99.5, 100.0, 100.5, 101.0,  # rise: fast crosses up
+    100.0, 99.5, 99.0, 98.5, 98.0, 97.5,  # падение: fast ниже slow
+    98.0, 98.5, 99.0, 99.5, 100.0, 100.5, 101.0,  # рост: fast пересекает вверх
 ]
 DOWN_CLOSES = [
-    100.5, 100.0, 99.5, 99.0, 98.5, 98.0, 97.5, 97.0,  # decline: cross down
+    100.5, 100.0, 99.5, 99.0, 98.5, 98.0, 97.5, 97.0,  # падение: cross down
 ]
 
 
@@ -34,7 +34,7 @@ def candles_from_closes(closes: list[float]) -> pd.DataFrame:
 
 
 def feed(strategy: SmaCrossStrategy, candles: pd.DataFrame) -> list[tuple[int, object]]:
-    """Feed growing slices; return [(candle_index, signal), ...]."""
+    """Скормить растущие срезы; вернуть [(индекс свечи, сигнал), ...]."""
     emitted: list[tuple[int, object]] = []
     for i in range(len(candles)):
         for signal in strategy.on_candle(candles.iloc[: i + 1]):
@@ -121,7 +121,7 @@ class TestEntry:
         assert signal.stop_loss == pytest.approx(close_at_signal - 2.0 * ATR_VALUE)
 
     def test_entry_matches_independent_sma_oracle(self) -> None:
-        # Independent oracle: rolling means computed directly in the test.
+        # Независимый оракул: скользящие средние считаются прямо в тесте.
         strategy = make_strategy()
         candles = candles_from_closes(UP_CROSS_CLOSES)
         close = candles["close"]
@@ -133,7 +133,7 @@ class TestEntry:
         index, _ = emitted[0]
         assert fast.iloc[index] > slow.iloc[index]
         assert fast.iloc[index - 1] <= slow.iloc[index - 1]
-        # No earlier index satisfies the cross condition.
+        # Ни один более ранний индекс не удовлетворяет условию пересечения.
         for j in range(index):
             assert not (fast.iloc[j] > slow.iloc[j] and fast.iloc[j - 1] <= slow.iloc[j - 1])
 
@@ -161,17 +161,17 @@ class TestExit:
             for i, s in feed(strategy, candles.iloc[entry_index + 1 :])
             if s.kind is SignalKind.LONG_EXIT
         ]
-        # Rebase exit indices (feed() restarts from a sliced dataframe).
+        # Пересчитываем индексы выходов (feed() стартует со срезанного фрейма).
         exits = [(i + entry_index + 1, s) for i, s in exits]
 
         assert len(exits) == 1
         assert exits[0][1].reason == "sma cross down"
 
     def test_no_strategy_stop_breach_exit_engine_owns_the_stop(self) -> None:
-        # The stop-breach exit path is gone: even a close below the would-be
-        # fill-based stop (entry close 99 - 2*ATR = 95; the crash closes at
-        # 94.5) can only exit through the SMA cross down — the engine's
-        # intrabar stop is the only stop path left.
+        # Путь выхода по пробою стопа отсутствует: даже закрытие ниже
+        # гипотетического стопа от fill (close входа 99 - 2*ATR = 95; crash
+        # закрывается на 94.5) может выйти только через SMA cross down —
+        # интрабарный стоп движка единственный оставшийся стоп-путь.
         strategy = make_strategy()
         candles = candles_from_closes(UP_CROSS_CLOSES + [94.5, 94.0, 93.5])
 
@@ -180,7 +180,7 @@ class TestExit:
         in_position = False
         for i in range(len(candles)):
             if entry_close is not None and not in_position:
-                # The engine fills the queued entry at this candle's open.
+                # Движок исполняет queued-вход на open этой свечи.
                 strategy.on_fill(
                     make_fill("buy", entry_close, candles["timestamp"].iloc[i])
                 )
@@ -192,7 +192,7 @@ class TestExit:
                     exits.append(signal)
 
         assert entry_close is not None
-        assert entry_close - 2.0 * ATR_VALUE > 94.5  # the crash is below the stop
+        assert entry_close - 2.0 * ATR_VALUE > 94.5  # крах ниже стопа
         assert len(exits) == 1
         assert exits[0].reason == "sma cross down"
 
@@ -200,7 +200,7 @@ class TestExit:
         strategy = make_strategy()
         candles = candles_from_closes(UP_CROSS_CLOSES + DOWN_CLOSES)
 
-        emitted = feed(strategy, candles)  # no on_fill -> strategy stays flat
+        emitted = feed(strategy, candles)  # без on_fill -> стратегия остаётся без позиции
 
         assert all(s.kind is SignalKind.LONG_ENTRY for _, s in emitted)
 
@@ -213,7 +213,7 @@ class TestExit:
         strategy.on_fill(make_fill("buy", entry_price, candles["timestamp"].iloc[entry_index]))
         strategy.on_fill(make_fill("sell", entry_price, candles["timestamp"].iloc[entry_index]))
 
-        # Flat again: the same cross-up re-fires on a fresh identical rise.
+        # Снова плоско: тот же cross-up повторно срабатывает на новом идентичном росте.
         assert strategy._in_position is False
 
 

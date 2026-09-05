@@ -1,4 +1,4 @@
-"""Tests for the risk manager / position sizing."""
+"""Тесты риск-менеджера / расчёта размера позиции."""
 
 from __future__ import annotations
 
@@ -14,13 +14,13 @@ class TestPositionQuantity:
         assert risk.position_quantity(equity=1_000.0, price=100.0) == pytest.approx(9.5)
 
     def test_rounds_down_to_precision(self) -> None:
-        # 100 * 0.95 / 3 = 31.666666... -> floor at 6 decimals
+        # 100 * 0.95 / 3 = 31.666666... -> floor до 6 знаков
         risk = RiskManager(position_size_pct=0.95, quantity_precision=6)
 
         quantity = risk.position_quantity(equity=100.0, price=3.0)
 
         assert quantity == pytest.approx(31.666666)
-        assert quantity * 3.0 <= 95.0  # never overshoots the allocated share
+        assert quantity * 3.0 <= 95.0  # никогда не выходит за выделенную долю
 
     def test_precision_is_respected(self) -> None:
         risk = RiskManager(position_size_pct=1.0, quantity_precision=2)
@@ -46,7 +46,7 @@ class TestPositionQuantity:
         assert risk.position_quantity(equity=100.0, price=0.0) == 0.0
 
     def test_dust_quantity_gives_zero(self) -> None:
-        # 1 * 1.0 / 1e9 floors to 0 at precision 6
+        # 1 * 1.0 / 1e9 при точности 6 даёт floor до 0
         risk = RiskManager(position_size_pct=1.0, quantity_precision=6, min_notional=0.0)
 
         assert risk.position_quantity(equity=1.0, price=1e9) == 0.0

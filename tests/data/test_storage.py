@@ -1,4 +1,4 @@
-"""Tests for Parquet candle storage and OHLCV validation."""
+"""Тесты Parquet-хранилища свечей и валидации OHLCV."""
 
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ class TestAppend:
     def test_overwrites_last_candle(self, storage) -> None:
         storage.save("bybit", "BTC/USDT", "1h", rows_to_df(make_candles(5)))
         refreshed = make_candles(1, start_ms=BASE_MS + 4 * HOUR_MS)
-        refreshed[0][5] = 999.0  # new volume for the same timestamp
+        refreshed[0][5] = 999.0  # новый объём для той же метки времени
 
         merged = storage.append("bybit", "BTC/USDT", "1h", rows_to_df(refreshed))
 
@@ -100,8 +100,8 @@ class TestValidate:
 
     def test_detects_high_below_body_and_low_above_body(self) -> None:
         rows = make_candles(3)
-        rows[1][2] = 1.0  # high below max(open, close)
-        rows[1][3] = 500.0  # low above min(open, close)
+        rows[1][2] = 1.0  # high ниже max(open, close)
+        rows[1][3] = 500.0  # low выше min(open, close)
 
         problems = validate_ohlcv(rows_to_df(rows), "1h")
 
@@ -110,7 +110,7 @@ class TestValidate:
 
     def test_detects_gap(self) -> None:
         rows = make_candles(10)
-        rows = rows[:4] + rows[6:]  # drop candles 4 and 5
+        rows = rows[:4] + rows[6:]  # выбрасываем свечи 4 и 5
 
         problems = validate_ohlcv(rows_to_df(rows), "1h")
 
@@ -119,7 +119,7 @@ class TestValidate:
 
     def test_detects_irregular_short_interval(self) -> None:
         rows = make_candles(3)
-        rows[2][0] = rows[1][0] + 60_000  # 1 minute instead of 1 hour
+        rows[2][0] = rows[1][0] + 60_000  # 1 минута вместо 1 часа
 
         problems = validate_ohlcv(rows_to_df(rows), "1h")
 

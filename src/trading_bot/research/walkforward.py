@@ -1,29 +1,29 @@
-"""Walk-forward analysis: re-optimize on in-sample, verify on out-of-sample.
+"""Walk-forward анализ: переоптимизация на ин-семпл, проверка на аут-оф-семпл.
 
-The history is split into consecutive windows of an in-sample (IS) span
-followed by an out-of-sample (OOS) span. Per window:
+История делится на последовательные окна из ин-семпл (IS) отрезка, за которым
+следует аут-оф-семпл (OOS) отрезок. Для каждого окна:
 
-1. the parameter grid is swept over the IS span (reusing :func:`run_sweep`);
-2. the best valid combination by ``objective`` is selected;
-3. that combination is run once over the OOS span, preceded by a *lead-in*
-   of ``strategy.warmup_period`` candles so indicators warm up on data
-   before the OOS start (the engine starts every window with an empty
-   portfolio, so a position can only be *opened* during the lead-in);
-4. only the equity part at/after ``oos_start`` counts towards OOS metrics
-   and the stitched curve — PnL earned before ``oos_start`` is discarded.
-   A trade opened during the lead-in but closed inside the OOS span still
-   contributes its OOS part to the equity/return, yet is excluded from the
-   trade metrics — hence a window can show a nonzero return with zero
-   recorded trades.
+1. сетка параметров прогоняется по IS-отрезку (переиспользуя
+   :func:`run_sweep`);
+2. выбирается лучшая валидная комбинация по ``objective``;
+3. эта комбинация один раз прогоняется по OOS-отрезку, перед которым идёт
+   *lead-in* из ``strategy.warmup_period`` свечей, чтобы индикаторы
+   разогрелись на данных до начала OOS (движок стартует каждое окно с
+   пустого портфеля, поэтому позиция в lead-in может только *открыться*);
+4. в OOS-метрики и сшитую кривую идёт только часть эквити с ``oos_start`` —
+   PnL, заработанный до ``oos_start``, отбрасывается. Сделка, открытая в
+   lead-in, но закрытая внутри OOS-отрезка, всё же вносит свою OOS-часть в
+   эквити/доходность, но исключена из trade-метрик — из-за этого окно может
+   показать ненулевую доходность при нуле записанных сделок.
 
-The stitched curve is the concatenation of the per-window OOS equity parts,
-each normalized to its own first value and multiplied by the accumulated
-growth: an estimate of what the strategy would have returned with periodic
-re-optimization, free of look-ahead bias. The calendar gaps between windows
-become zero returns in ``pct_change``, which slightly distorts the
-annualized Sharpe of the stitched curve — a deliberate simplification.
+Сшитая кривая — конкатенация OOS-частей эквити по окнам, каждая нормирована
+к своему первому значению и умножена на накопленный рост: оценка того, что
+стратегия дала бы при периодической переоптимизации, без заглядывания в
+будущее. Календарные разрывы между окнами становятся нулевыми доходностями
+в ``pct_change``, что слегка искажает аннуализированный Шарп сшитой кривой —
+сознательное упрощение.
 
-Pure functions over candles; all I/O (artifacts, plots) lives in the CLI.
+Чистые функции над свечами; весь I/O (артефакты, графики) живёт в CLI.
 """
 
 from __future__ import annotations
@@ -46,16 +46,17 @@ from trading_bot.strategy import create_strategy
 
 logger = logging.getLogger(__name__)
 
-# Safety cap: walk-forward runs a full sweep per window; too many windows
-# means the user probably asked for OOS days too small for the dataset.
+# Предохранительный потолок: walk-forward гоняет полный sweep на каждое окно;
+# слишком много окон — значит, пользователь скорее всего запросил слишком
+# малые OOS-дни для этого датасета.
 MAX_WINDOWS = 50
 
 MODES = ("rolling", "anchored")
 OBJECTIVES = ("sharpe", "total_return_pct")
 
-# Columns of a walk-forward results row (after the parameter columns):
-# grid parameter names that collide with these would corrupt results.csv,
-# so they are rejected at the ``--param`` validation point.
+# Колонки строки результата walk-forward (после колонок параметров):
+# имена параметров сетки, совпадающие с ними, испортили бы results.csv,
+# поэтому они отбрасываются на этапе валидации ``--param``.
 WINDOW_COLUMNS = (
     "is_start",
     "is_end",
@@ -75,7 +76,7 @@ _DAY = pd.Timedelta(days=1)
 
 @dataclass(frozen=True)
 class Window:
-    """One walk-forward window; ``is_end == oos_start`` (no gap, no overlap)."""
+    """Одно окно walk-forward; ``is_end == oos_start`` (без разрывов и перекрытий)."""
 
     is_start: pd.Timestamp
     is_end: pd.Timestamp
@@ -85,11 +86,11 @@ class Window:
 
 @dataclass
 class WindowResult:
-    """Outcome of a single walk-forward window.
+    """Исход одного окна walk-forward.
 
-    ``best_params``/``is_objective`` are ``None`` and ``error`` carries the
-    reason when the window failed (no valid IS combination or an OOS run
-    error); ``oos_*`` metrics are ``None`` for failed windows.
+    ``best_params``/``is_objective`` равны ``None``, а ``error`` несёт причину,
+    если окно упало (нет валидных IS-комбинаций или ошибка OOS-прогона);
+    метрики ``oos_*`` равны ``None`` для упавших окон.
     """
 
     is_start: pd.Timestamp
@@ -108,16 +109,18 @@ class WindowResult:
 
 @dataclass
 class WalkForwardResult:
-    """Artifacts of a walk-forward run.
+    """Артефакты прогона walk-forward.
 
     Attributes:
-        windows: one :class:`WindowResult` per planned window, chronological,
-            failed windows included (they simply contribute no OOS data).
-        stitched_equity: concatenated OOS equity parts, each normalized to
-            its first value and multiplied by the accumulated growth; starts
-            at 1.0. Empty when no window succeeded.
-        trades: all OOS trades across windows (``TradeRecord`` schema).
-        meta: JSON-safe run parameters (mode, days, objective, grid, ...).
+        windows: по одному :class:`WindowResult` на запланированное окно,
+            хронологически, включая упавшие окна (они просто не дают
+            OOS-данных).
+        stitched_equity: конкатенация OOS-частей эквити, каждая нормирована
+            к своему первому значению и умножена на накопленный рост;
+            начинается с 1.0. Пуста, если ни одно окно не выполнилось.
+        trades: все OOS-сделки по всем окнам (схема ``TradeRecord``).
+        meta: JSON-совместимые параметры прогона (mode, дни, objective,
+            сетка, ...).
     """
 
     windows: list[WindowResult] = field(default_factory=list)
@@ -132,7 +135,7 @@ class WalkForwardResult:
     meta: dict[str, Any] = field(default_factory=dict)
 
     def to_frame(self, param_grid: dict[str, list]) -> pd.DataFrame:
-        """Window records as a dataframe (grid params, dates, metrics, error)."""
+        """Записи окон как фрейм (параметры сетки, даты, метрики, ошибка)."""
         rows = []
         for window in self.windows:
             row: dict[str, Any] = dict.fromkeys(param_grid, math.nan)
@@ -162,35 +165,38 @@ def plan_windows(
     oos_days: int,
     mode: str = "rolling",
 ) -> list[Window]:
-    """Plan the walk-forward windows over ``[start_ts, end_ts)``.
+    """Спланировать walk-forward окна по ``[start_ts, end_ts)``.
 
-    Boundaries are in calendar days.
+    Границы — в календарных днях.
 
-    ``rolling``: fixed-length IS/OOS blocks tile the timeline back-to-back —
-    a new IS starts where the previous OOS ended, so the optimizer never
-    sees a previous window's OOS data (the OOS spans are ``is_days`` apart).
+    ``rolling``: блоки IS/OOS фиксированной длины выкладываются на таймлайн
+    встык — новый IS начинается там, где закончился предыдущий OOS, поэтому
+    оптимизатор никогда не видит OOS-данные предыдущего окна (OOS-отрезки
+    разнесены на ``is_days``).
 
-    ``anchored``: ``is_start`` stays at the overall start and the IS span
-    grows by ``oos_days`` each step; the OOS spans tile the tail without
-    overlap.
+    ``anchored``: ``is_start`` остаётся в общем начале, а IS-отрезок растёт
+    на ``oos_days`` за каждый шаг; OOS-отрезки выкладываются по хвосту
+    без перекрытий.
 
-    A window is planned only if its OOS span ends at or before ``end_ts``.
+    Окно планируется, только если его OOS-отрезок заканчивается не позже
+    ``end_ts``.
 
     Args:
-        start_ts: overall start (inclusive), tz-aware UTC.
-        end_ts: overall end (exclusive), tz-aware UTC.
-        is_days: in-sample span in days; must be positive.
-        oos_days: out-of-sample span in days; must be positive.
-        mode: ``"rolling"`` or ``"anchored"``.
+        start_ts: общее начало (включительно), tz-aware UTC.
+        end_ts: общий конец (не включительно), tz-aware UTC.
+        is_days: длина ин-семпл отрезка в днях; должна быть положительной.
+        oos_days: длина аут-оф-семпл отрезка в днях; должна быть положительной.
+        mode: ``"rolling"`` или ``"anchored"``.
 
     Returns:
-        Chronological windows; every window satisfies ``is_end == oos_start``.
+        Окна в хронологическом порядке; каждое окно удовлетворяет
+        ``is_end == oos_start``.
 
     Raises:
-        ValueError: if ``is_days``/``oos_days`` are not positive, ``mode`` is
-            unknown, the data span is shorter than ``is_days + oos_days`` (no
-            window fits), or more than :data:`MAX_WINDOWS` windows would be
-            planned.
+        ValueError: если ``is_days``/``oos_days`` неположительны, ``mode``
+            неизвестен, протяжённость данных меньше ``is_days + oos_days``
+            (ни одно окно не помещается) или окон получилось бы больше,
+            чем :data:`MAX_WINDOWS`.
     """
     if is_days <= 0:
         raise ValueError(f"is_days must be positive, got {is_days}")
@@ -246,29 +252,30 @@ def run_walkforward(
     mode: str = "rolling",
     objective: str = "sharpe",
 ) -> WalkForwardResult:
-    """Run walk-forward analysis: per-window IS optimization -> OOS verification.
+    """Прогнать walk-forward: оптимизация на IS в каждом окне -> проверка на OOS.
 
-    Windows come from :func:`plan_windows` over the available candle range.
-    The IS sweep reuses :func:`run_sweep` (including its error-row semantics)
-    via a period-adjusted copy of ``base_config``; the best valid row by
-    ``objective`` (NaN/None objective values are not rankable) is then run
-    once over the OOS span with a lead-in of ``strategy.warmup_period``
-    candles before ``oos_start`` (fewer if the data does not reach back that
-    far). OOS metrics are computed on the equity part at/after ``oos_start``
-    and trades entering at/after ``oos_start``, so PnL earned before
-    ``oos_start`` is deliberately discarded; the engine starts each window
-    with an empty portfolio, so the lead-in can only open positions, and a
-    lead-in trade closed inside OOS contributes to the equity but not to
-    the trade metrics.
+    Окна приходят из :func:`plan_windows` по доступному диапазону свечей.
+    IS-sweep переиспользует :func:`run_sweep` (включая семантику строк с
+    ошибками) через копию ``base_config`` с изменённым периодом; лучшая
+    валидная строка по ``objective`` (значения NaN/None неранжируемы) затем
+    один раз прогоняется по OOS-отрезку с lead-in из ``strategy.warmup_period``
+    свечей перед ``oos_start`` (меньше, если данные не дотягиваются назад).
+    OOS-метрики считаются по части эквити с ``oos_start`` и сделкам со входом
+    с ``oos_start``, так что PnL до ``oos_start`` сознательно отбрасывается;
+    движок стартует каждое окно с пустого портфеля, поэтому lead-in может
+    только открыть позиции, а сделка из lead-in, закрытая внутри OOS, вносит
+    вклад в эквити, но не в trade-метрики.
 
-    A window whose IS sweep fails (empty IS slice due to a data gap, invalid
-    candles, ...) becomes an error row; the remaining windows still run.
+    Окно, чей IS-sweep упал (пустой IS-срез из-за разрыва в данных,
+    невалидные свечи, ...), становится строкой с ошибкой; остальные окна
+    всё равно выполняются.
 
     Raises:
-        ValueError: if ``candles`` is empty, ``objective`` is unknown, the
-            grid exceeds :data:`~trading_bot.research.sweep.MAX_COMBINATIONS`
-            (the cap is the same for every window, so it is checked once up
-            front), or window planning fails (see :func:`plan_windows`).
+        ValueError: если ``candles`` пуст, ``objective`` неизвестен, сетка
+            превышает :data:`~trading_bot.research.sweep.MAX_COMBINATIONS`
+            (потолок один и тот же для каждого окна, поэтому проверяется
+            один раз заранее) или не удалось спланировать окна
+            (см. :func:`plan_windows`).
     """
     if objective not in OBJECTIVES:
         raise ValueError(f"unknown objective {objective!r}; available: {', '.join(OBJECTIVES)}")
@@ -339,10 +346,10 @@ def _run_window(
     mode: str,
     objective: str,
 ) -> tuple[WindowResult, pd.Series | None, pd.DataFrame | None]:
-    """Run one window: IS sweep, best-combo selection, OOS verification.
+    """Прогнать одно окно: IS-sweep, выбор лучшей комбинации, OOS-проверка.
 
-    Returns ``(result, oos_equity_part, oos_trades)``; the last two are
-    ``None`` when the window failed.
+    Возвращает ``(result, oos_equity_part, oos_trades)``; последние два
+    равны ``None``, если окно упало.
     """
     result = WindowResult(
         is_start=window.is_start,
@@ -351,8 +358,9 @@ def _run_window(
         oos_end=window.oos_end,
         mode=mode,
     )
-    # Same slice run_sweep would build from the config period; checked here
-    # so a data gap (e.g. a missing chunk of history) fails only this window.
+    # Тот же срез, который run_sweep построил бы из периода конфига;
+    # проверяется здесь, чтобы разрыв данных (например, пропавший кусок
+    # истории) уронил только это окно.
     if _slice_range(candles, window.is_start, window.is_end).empty:
         result.error = "no candles in IS window"
         return result, None, None
@@ -367,9 +375,9 @@ def _run_window(
             param_grid,
             candles,
         )
-    except ValueError as error:  # one bad IS window must not kill the run
-        # the combinations cap is checked up front in run_walkforward, so a
-        # cap ValueError can never reach this point
+    except ValueError as error:  # одно плохое IS-окно не должно убить прогон
+        # потолок комбинаций проверяется заранее в run_walkforward, поэтому
+        # ValueError про потолок сюда дойти не может
         logger.debug("walk-forward window %s: IS sweep failed", window, exc_info=True)
         result.error = str(error) or type(error).__name__
         return result, None, None
@@ -383,8 +391,8 @@ def _run_window(
         return result, None, None
 
     best = valid.loc[scores.idxmax()]
-    # dataframe cells come back as numpy scalars; the strategy constructors
-    # (and json.dumps) expect plain Python int/float
+    # ячейки фрейма возвращаются как numpy-скаляры; конструкторы стратегий
+    # (и json.dumps) ждут обычные Python int/float
     result.best_params = {name: _pythonize(best[name]) for name in param_grid}
     result.is_objective = float(best[objective])
 
@@ -397,7 +405,7 @@ def _run_window(
         )
         oos_slice = _slice_range(candles, window.oos_start - lead_in, window.oos_end)
         engine_result = build_engine(base_config, strategy).run(oos_slice)
-    except Exception as error:  # noqa: BLE001 - one bad window must not kill the run
+    except Exception as error:  # noqa: BLE001 - одно плохое окно не должно убить прогон
         logger.debug("walk-forward window %s failed", window, exc_info=True)
         result.error = str(error) or type(error).__name__
         return result, None, None
@@ -416,18 +424,18 @@ def _run_window(
 
 
 def _pythonize(value: Any) -> Any:
-    """Convert a numpy scalar from a dataframe cell to a plain Python scalar."""
+    """Перевести numpy-скаляр из ячейки фрейма в обычный Python-скаляр."""
     return value.item() if isinstance(value, np.generic) else value
 
 
 def _slice_range(candles: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
-    """Keep candles with ``start <= timestamp < end`` (``start`` may predate data)."""
+    """Оставить свечи с ``start <= timestamp < end`` (``start`` может быть раньше данных)."""
     ts = candles["timestamp"]
     return candles.loc[(ts >= start) & (ts < end)].reset_index(drop=True)
 
 
 def _filter_trades_by_entry(trades: pd.DataFrame, oos_start: pd.Timestamp) -> pd.DataFrame:
-    """Keep trades that entered at/after ``oos_start``."""
+    """Оставить сделки со входом не раньше ``oos_start``."""
     if trades.empty:
         return trades
     entry_ts = pd.to_datetime(trades["entry_ts"], utc=True)
@@ -435,5 +443,5 @@ def _filter_trades_by_entry(trades: pd.DataFrame, oos_start: pd.Timestamp) -> pd
 
 
 def _stitch_segment(oos_part: pd.Series, accumulated: float) -> pd.Series:
-    """Normalize one OOS equity part to its first value and scale by ``accumulated``."""
+    """Нормировать OOS-часть эквити к её первому значению и умножить на ``accumulated``."""
     return oos_part.astype("float64") / float(oos_part.iloc[0]) * accumulated

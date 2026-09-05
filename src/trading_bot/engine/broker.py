@@ -1,4 +1,4 @@
-"""Simulated market-order execution with fees and slippage."""
+"""Симуляция исполнения рыночных ордеров с комиссией и проскальзыванием."""
 
 from __future__ import annotations
 
@@ -13,10 +13,10 @@ SIDE_SELL = "sell"
 
 
 class SimulatedBroker:
-    """Deterministic fill model for backtests.
+    """Детерминированная модель исполнения для бэктестов.
 
-    Buys fill above the reference price, sells below it (slippage works
-    against us); the fee is a flat rate over the executed notional.
+    Покупки исполняются выше опорной цены, продажи ниже неё (проскальзывание
+    работает против нас); комиссия — плоская ставка от исполненного объёма.
     """
 
     def __init__(self, fee_rate: float, slippage_bps: float) -> None:
@@ -35,18 +35,18 @@ class SimulatedBroker:
         timestamp: pd.Timestamp,
         reason: str,
     ) -> Fill:
-        """Execute a market order against ``price_ref`` (typically an open).
+        """Исполнить рыночный ордер по ``price_ref`` (обычно это open).
 
         Args:
-            side: ``"buy"`` or ``"sell"``.
-            quantity: order size in base currency (must be positive).
-            price_ref: reference price before slippage.
-            timestamp: execution timestamp.
-            reason: reason carried from the originating signal.
+            side: ``"buy"`` или ``"sell"``.
+            quantity: размер ордера в базовой валюте (должен быть положительным).
+            price_ref: опорная цена до проскальзывания.
+            timestamp: метка времени исполнения.
+            reason: причина, перенесённая от исходного сигнала.
 
         Returns:
-            The resulting :class:`Fill` with the slipped price and the fee
-            (``notional * fee_rate`` in quote currency).
+            Итоговый :class:`Fill` с ценой после проскальзывания и комиссией
+            (``notional * fee_rate`` в котируемой валюте).
         """
         if side not in (SIDE_BUY, SIDE_SELL):
             raise ValueError(f"side must be {SIDE_BUY!r} or {SIDE_SELL!r}, got {side!r}")

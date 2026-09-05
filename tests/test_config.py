@@ -1,4 +1,4 @@
-"""Tests for configuration loading."""
+"""Тесты загрузки конфигурации."""
 
 from __future__ import annotations
 

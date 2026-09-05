@@ -1,4 +1,4 @@
-"""Thin wrapper around the ccxt Bybit exchange client."""
+"""Тонкая обёртка над биржевым клиентом ccxt.bybit."""
 
 from __future__ import annotations
 
@@ -13,10 +13,10 @@ _TIMEFRAME_UNITS_MS: dict[str, int] = {
 
 
 class ExchangeClient:
-    """Minimal wrapper over ``ccxt.bybit`` limited to public OHLCV access.
+    """Минимальная обёртка над ``ccxt.bybit``, ограниченная публичным доступом к OHLCV.
 
-    Only public market data is used, so no API keys are required.
-    Rate limiting is delegated to ccxt via ``enableRateLimit``.
+    Используются только публичные рыночные данные, поэтому API-ключи не нужны.
+    Ограничение частоты запросов делегировано ccxt через ``enableRateLimit``.
     """
 
     def __init__(self) -> None:
@@ -29,16 +29,16 @@ class ExchangeClient:
         since_ms: int | None = None,
         limit: int = 1000,
     ) -> list[list]:
-        """Fetch raw OHLCV candles from Bybit.
+        """Получить сырые OHLCV-свечи с Bybit.
 
         Args:
-            symbol: ccxt symbol, e.g. ``"BTC/USDT"``.
-            timeframe: ccxt timeframe, e.g. ``"15m"``, ``"4h"``, ``"1d"``.
-            since_ms: fetch candles starting at this timestamp (ms since epoch).
-            limit: maximum number of candles per request.
+            symbol: символ в формате ccxt, напр. ``"BTC/USDT"``.
+            timeframe: таймфрейм в формате ccxt, напр. ``"15m"``, ``"4h"``, ``"1d"``.
+            since_ms: получать свечи начиная с этого момента времени (мс от эпохи).
+            limit: максимальное число свечей в одном запросе.
 
         Returns:
-            Raw candle rows ``[timestamp_ms, open, high, low, close, volume]``.
+            Сырые строки свечей ``[timestamp_ms, open, high, low, close, volume]``.
         """
         return self.exchange.fetch_ohlcv(
             symbol, timeframe=timeframe, since=since_ms, limit=limit
@@ -46,13 +46,13 @@ class ExchangeClient:
 
 
 def timeframe_to_ms(timeframe: str) -> int:
-    """Convert a ccxt-style timeframe string to its duration in milliseconds.
+    """Перевести строку таймфрейма в стиле ccxt в длительность в миллисекундах.
 
-    Supported units: ``m`` (minute), ``h`` (hour), ``d`` (day), ``w`` (week).
-    Variable-length units (month, year) are not supported.
+    Поддерживаемые единицы: ``m`` (минута), ``h`` (час), ``d`` (день),
+    ``w`` (неделя). Единицы переменной длины (месяц, год) не поддерживаются.
 
     Raises:
-        ValueError: if the timeframe is not a supported ``<count><unit>`` string.
+        ValueError: если таймфрейм — не поддерживаемая строка ``<count><unit>``.
     """
     if len(timeframe) < 2:
         raise ValueError(f"invalid timeframe: {timeframe!r}")

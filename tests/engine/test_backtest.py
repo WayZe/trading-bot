@@ -1,4 +1,4 @@
-"""Tests for the backtest engine event loop (offline, synthetic candles)."""
+"""Тесты событийного цикла бэктест-движка (офлайн, синтетические свечи)."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ START_CASH = 1_000.0
 
 
 class ScriptedStrategy(Strategy):
-    """Emits programmed signals at fixed candle indices."""
+    """Выдаёт запрограммированные сигналы на фиксированных индексах свечей."""
 
     name = "scripted"
 
@@ -55,7 +55,7 @@ class ScriptedStrategy(Strategy):
 
 
 class PryingStrategy(Strategy):
-    """Tries to read past the end of the candle slice at every step."""
+    """На каждом шаге пытается заглянуть за конец среза свечей."""
 
     name = "prying"
 
@@ -71,7 +71,7 @@ class PryingStrategy(Strategy):
         n = len(candles)
         self.seen_lengths.append(n)
         try:
-            candles.iloc[n]  # one row past the slice must not exist
+            candles.iloc[n]  # строки за пределами среза существовать не должно
             self.out_of_bounds_blocked.append(False)
         except IndexError:
             self.out_of_bounds_blocked.append(True)
@@ -79,7 +79,7 @@ class PryingStrategy(Strategy):
 
 
 def flat_candles(prices: list[float]) -> pd.DataFrame:
-    """Candles where o = h = l = c (valid OHLC)."""
+    """Свечи, где o = h = l = c (валидный OHLC)."""
     rows = [
         [BASE_MS + i * HOUR_MS, p, p, p, p, 1.0] for i, p in enumerate(prices)
     ]
@@ -98,13 +98,13 @@ def make_engine(strategy: Strategy) -> BacktestEngine:
 class TestFullCycle:
     def test_one_entry_one_exit_exact_math(self) -> None:
         prices = [100.0, 100.0, 100.0, 100.0, 110.0, 110.0, 110.0, 110.0]
-        prices += [105.0] * 7  # 15 candles total; exit executes at open[8] = 105
+        prices += [105.0] * 7  # всего 15 свечей; выход исполняется на open[8] = 105
         candles = flat_candles(prices)
         engine = make_engine(ScriptedStrategy(entry_at=2, exit_at=7))
 
         result = engine.run(candles)
 
-        # Sizing at the signal candle (close=100, equity=1000): qty = 9.5.
+        # Размер позиции на сигнальной свече (close=100, equity=1000): qty = 9.5.
         qty = 9.5
         entry_price = 100.0 * (1 + SLIP / 10_000)  # 100.05
         entry_fee = qty * entry_price * FEE
@@ -137,10 +137,10 @@ class TestFullCycle:
 
         assert len(result.equity_curve) == len(candles)
         assert list(result.equity_curve.index) == list(candles["timestamp"])
-        # Flat before the entry executes at open of candle 3.
+        # Плоско до входа, который исполняется на open свечи 3.
         assert result.equity_curve.iloc[:3].to_list() == pytest.approx([START_CASH] * 3)
-        # Mark-to-market while the position is open: entry fills at open[3]
-        # (close 100), the 110 closes start at candle 4.
+        # Переоценка по рынку, пока позиция открыта: вход исполняется на open[3]
+        # (close 100), закрытия 110 начинаются со свечи 4.
         entry_price = 100.0 * (1 + SLIP / 10_000)
         qty = 9.5
         cash_after_entry = START_CASH - qty * entry_price - qty * entry_price * FEE
@@ -193,17 +193,17 @@ class TestLookAhead:
         engine.run(candles)
 
         assert strategy.seen_lengths == list(range(1, n + 1))
-        # Reading one row past the slice always fails: no future data leaks.
+        # Чтение строки за срезом всегда падает: данные будущего не утекают.
         assert all(strategy.out_of_bounds_blocked)
 
 
 class TestIntrabarStops:
-    """Stop/TP levels are re-anchored to the entry fill price.
+    """Уровни стоп/тейк переякориваются на цену исполнения входа.
 
-    For a signal on candle 0 (close 100, flat candle) the entry executes at
-    open[1] slipped: with SLIP=5 bps that is ``100 * 1.0005``. A stop of 95
-    (distance 5 from the signal close) becomes ``fill - 5``, a take-profit
-    of 105 becomes ``fill + 5``.
+    Для сигнала на свече 0 (close 100, плоская свеча) вход исполняется на
+    open[1] с проскальзыванием: при SLIP=5 bps это ``100 * 1.0005``. Стоп 95
+    (дистанция 5 от сигнального close) становится ``fill - 5``, тейк-профит
+    105 — ``fill + 5``.
     """
 
     SIGNAL_CLOSE = 100.0
@@ -213,7 +213,7 @@ class TestIntrabarStops:
         rows = [
             [BASE_MS, 100.0, 100.0, 100.0, 100.0, 1.0],
             [BASE_MS + HOUR_MS, 100.0, 101.0, 99.0, 100.0, 1.0],
-            # Opens at 90, far below the stop: the conservative fill is the open.
+            # Открытие на 90, сильно ниже стопа: консервативное исполнение — по open.
             [BASE_MS + 2 * HOUR_MS, 90.0, 92.0, 88.0, 91.0, 1.0],
         ]
         candles = rows_to_df(rows)
@@ -230,7 +230,7 @@ class TestIntrabarStops:
     def test_stop_hit_inside_bar_fills_at_stop(self) -> None:
         rows = [
             [BASE_MS, 100.0, 100.0, 100.0, 100.0, 1.0],
-            # Low 94 is below the re-anchored stop (fill - 5 = 95.05).
+            # Low 94 ниже переякоренного стопа (fill - 5 = 95.05).
             [BASE_MS + HOUR_MS, 100.0, 101.0, 94.0, 99.0, 1.0],
         ]
         candles = rows_to_df(rows)
@@ -247,7 +247,7 @@ class TestIntrabarStops:
     def test_take_profit_fills_at_target(self) -> None:
         rows = [
             [BASE_MS, 100.0, 100.0, 100.0, 100.0, 1.0],
-            # High 106 reaches the re-anchored TP (fill + 5 = 105.05).
+            # High 106 достигает переякоренного тейка (fill + 5 = 105.05).
             [BASE_MS + HOUR_MS, 100.0, 106.0, 99.0, 105.0, 1.0],
         ]
         candles = rows_to_df(rows)
@@ -265,7 +265,7 @@ class TestIntrabarStops:
         rows = [
             [BASE_MS, 100.0, 100.0, 100.0, 100.0, 1.0],
             [BASE_MS + HOUR_MS, 100.0, 101.0, 99.0, 100.0, 1.0],
-            # Opens at 110, above the re-anchored TP (105.05): fill at the open.
+            # Открытие на 110, выше переякоренного тейка (105.05): исполнение по open.
             [BASE_MS + 2 * HOUR_MS, 110.0, 112.0, 109.0, 111.0, 1.0],
         ]
         candles = rows_to_df(rows)
@@ -280,7 +280,7 @@ class TestIntrabarStops:
     def test_stop_has_priority_over_take_profit(self) -> None:
         rows = [
             [BASE_MS, 100.0, 100.0, 100.0, 100.0, 1.0],
-            # Both re-anchored levels (95.05 / 105.05) are hit in this candle.
+            # Оба переякоренных уровня (95.05 / 105.05) задеты в этой свече.
             [BASE_MS + HOUR_MS, 100.0, 106.0, 94.0, 101.0, 1.0],
         ]
         candles = rows_to_df(rows)
@@ -296,13 +296,13 @@ class TestIntrabarStops:
 
 
 class TestStopAnchoring:
-    """The engine owns the stop and anchors it to the actual fill price."""
+    """Стоп принадлежит движку и якорится на фактическую цену исполнения."""
 
     def test_gap_up_entry_stop_is_exactly_fill_minus_distance(self) -> None:
-        # Signal candle closes at 100 with stop 95 (distance 5); the next
-        # candle opens 103 (gap up), so the fill is 103 * 1.0005 and the
-        # active stop is fill - 5, not the strategy's 95. The candle's low
-        # exactly equals the re-anchored stop: the <= comparison triggers it.
+        # Сигнальная свеча закрывается на 100 со стопом 95 (дистанция 5);
+        # следующая свеча открывается на 103 (гэп вверх), поэтому fill равен
+        # 103 * 1.0005, а активный стоп — fill - 5, а не 95 от стратегии.
+        # Low свечи в точности равен переякоренному стопу: сравнение <= срабатывает.
         entry_fill = 103.0 * (1 + SLIP / 10_000)
         active_stop = entry_fill - 5.0
         rows = [
@@ -321,10 +321,11 @@ class TestStopAnchoring:
         assert trade["reason_exit"] == "stop loss"
 
     def test_gap_up_entry_price_below_projected_stop_closes_intrabar(self) -> None:
-        # Review scenario: gap-up entry (fill ~103.05) lifts the active stop
-        # to ~98.05, above the strategy-projected 95. A dip to 96 stays above
-        # the projected stop but breaches the fill-anchored one: the engine
-        # must close intrabar instead of holding the position open.
+        # Сценарий из ревью: вход по гэпу вверх (fill ~103.05) поднимает
+        # активный стоп до ~98.05, выше проецированного стратегией 95.
+        # Провал до 96 остаётся выше проецированного стопа, но пробивает
+        # переякоренный на fill: движок должен закрыться интрабарно,
+        # а не держать позицию открытой.
         rows = [
             [BASE_MS, 100.0, 100.0, 100.0, 100.0, 1.0],
             [BASE_MS + HOUR_MS, 103.0, 104.0, 102.5, 103.5, 1.0],
@@ -342,12 +343,12 @@ class TestStopAnchoring:
         assert result.open_position is None
 
     def test_stop_on_the_entry_candle_itself(self) -> None:
-        # Signal on candle 0 -> entry at open[1]; the same candle 1 dips
-        # below the re-anchored stop, so the exit happens within candle 1.
+        # Сигнал на свече 0 -> вход на open[1]; та же свеча 1 проваливается
+        # ниже переякоренного стопа, поэтому выход происходит внутри свечи 1.
         rows = [
             [BASE_MS, 100.0, 100.0, 100.0, 100.0, 1.0],
-            # Fill at 101 * 1.0005 -> active stop 101.0505 - 5 = 96.0505;
-            # low 95 is below it.
+            # Fill на 101 * 1.0005 -> активный стоп 101.0505 - 5 = 96.0505;
+            # low 95 ниже него.
             [BASE_MS + HOUR_MS, 101.0, 101.5, 95.0, 96.5, 1.0],
             [BASE_MS + 2 * HOUR_MS, 96.0, 96.5, 95.5, 96.0, 1.0],
         ]
@@ -366,13 +367,13 @@ class TestStopAnchoring:
         assert result.open_position is None
 
     def test_pending_exit_at_open_beats_intrabar_stop_same_candle(self) -> None:
-        # The strategy's exit (queued on candle 1) executes at open[2]; the
-        # same candle also breaches the stop, but the position is already
-        # closed — no double sell is possible.
+        # Выход стратегии (в очереди со свечи 1) исполняется на open[2]; та же
+        # свеча пробивает стоп, но позиция уже закрыта — двойной продажи
+        # произойти не может.
         rows = [
             [BASE_MS, 100.0, 100.0, 100.0, 100.0, 1.0],
-            [BASE_MS + HOUR_MS, 100.0, 101.0, 99.0, 100.0, 1.0],  # entry, no stop hit
-            [BASE_MS + 2 * HOUR_MS, 96.0, 97.0, 94.0, 95.0, 1.0],  # exit + stop breach
+            [BASE_MS + HOUR_MS, 100.0, 101.0, 99.0, 100.0, 1.0],  # вход, стоп не задет
+            [BASE_MS + 2 * HOUR_MS, 96.0, 97.0, 94.0, 95.0, 1.0],  # выход + пробой стопа
         ]
         candles = rows_to_df(rows)
         engine = make_engine(ScriptedStrategy(entry_at=0, exit_at=1, stop_loss=95.0))
@@ -398,8 +399,8 @@ class TestSignalGuards:
         assert result.equity_curve.iloc[-1] == pytest.approx(START_CASH)
 
     def test_entry_below_min_notional_is_skipped(self) -> None:
-        # Sizing puts ~95% of the 1000 equity into the order (notional ~950);
-        # with min_notional above that the entry is rejected entirely.
+        # Райзсайзинг кладёт ~95% от 1000 equity в ордер (notional ~950);
+        # при min_notional выше этого вход отклоняется целиком.
         candles = flat_candles([2_000_000.0] * 5)
         engine = BacktestEngine(
             strategy=ScriptedStrategy(entry_at=1, exit_at=None),
@@ -463,13 +464,13 @@ class TestValidation:
 
 class TestSmaCrossIntegration:
     def test_full_cycle_one_trade_and_money_converge(self) -> None:
-        # Rise (cross up) then fall (cross down) with a 2.0 ATR spread;
-        # extra tail candles let the queued exit execute at the next open.
+        # Рост (cross up), затем падение (cross down) при размахе ATR 2.0;
+        # дополнительные хвостовые свечи дают queued-выходу исполниться на следующем open.
         closes = [
-            100.0, 99.5, 99.0, 98.5, 98.0, 97.5,  # decline: fast below slow
-            98.0, 98.5, 99.0, 99.5, 100.0, 100.5, 101.0,  # rise: cross up
-            100.5, 100.0, 99.5, 99.0, 98.5, 98.0, 97.5, 97.0,  # fall: cross down
-            96.5, 96.0, 96.0, 96.0,  # tail: exit executes, no re-entry
+            100.0, 99.5, 99.0, 98.5, 98.0, 97.5,  # падение: fast ниже slow
+            98.0, 98.5, 99.0, 99.5, 100.0, 100.5, 101.0,  # рост: cross up
+            100.5, 100.0, 99.5, 99.0, 98.5, 98.0, 97.5, 97.0,  # падение: cross down
+            96.5, 96.0, 96.0, 96.0,  # хвост: выход исполняется, повторного входа нет
         ]
         rows = [
             [BASE_MS + i * HOUR_MS, c, c + 1.0, c - 1.0, c, 1.0]
@@ -491,7 +492,7 @@ class TestSmaCrossIntegration:
         assert trade["reason_exit"] == "sma cross down"
         assert result.open_position is None
         assert result.n_pending_unfilled == 0
-        # Flat at the end: final equity is exactly start cash plus the pnl.
+        # В конце плоско: итоговое эквити в точности стартовый капитал плюс pnl.
         assert result.equity_curve.iloc[-1] == pytest.approx(
             START_CASH + float(trade["pnl"])
         )

@@ -1,13 +1,14 @@
-"""Vector technical indicators (pandas-based, written in-house).
+"""Векторные технические индикаторы (на pandas, написаны самостоятельно).
 
-Shared NaN/warmup semantics: every indicator returns a ``pd.Series`` of the
-same length and index as the input, with leading ``NaN`` values until the
-indicator is "ready" (has seen enough input candles):
+Общая семантика NaN/прогрева: каждый индикатор возвращает ``pd.Series`` той же
+длины и с тем же индексом, что и вход, с ведущими ``NaN`` до тех пор, пока
+индикатор не «готов» (не увидел достаточно входных свечей):
 
-- ``sma`` / ``ema``: the first valid value is at index ``period - 1``
-  (i.e. after ``period`` closes);
-- ``rsi`` / ``atr`` (Wilder-style): the first valid value is at index
-  ``period`` (they consume ``period`` price deltas / true ranges).
+- ``sma`` / ``ema``: первое валидное значение на индексе ``period - 1``
+  (то есть после ``period`` закрытий);
+- ``rsi`` / ``atr`` (сглаживание по Уайлдеру): первое валидное значение на
+  индексе ``period`` (они потребляют ``period`` ценовых дельт / истинных
+  диапазонов).
 """
 
 from __future__ import annotations
@@ -17,10 +18,10 @@ import pandas as pd
 
 
 def sma(close: pd.Series, period: int) -> pd.Series:
-    """Simple moving average over ``period`` closes.
+    """Простая скользящая средняя по ``period`` закрытий.
 
-    Leading ``period - 1`` values are NaN; the first valid value sits at
-    index ``period - 1``.
+    Первые ``period - 1`` значений — NaN; первое валидное значение стоит
+    на индексе ``period - 1``.
     """
     if period < 1:
         raise ValueError(f"period must be >= 1, got {period}")
@@ -28,11 +29,11 @@ def sma(close: pd.Series, period: int) -> pd.Series:
 
 
 def ema(close: pd.Series, period: int) -> pd.Series:
-    """Exponential moving average with ``span=period`` (``adjust=False``).
+    """Экспоненциальная скользящая средняя с ``span=period`` (``adjust=False``).
 
-    ``ewm`` naturally produces values from the first element; to keep the
-    warmup semantics uniform with :func:`sma`, values before index
-    ``period - 1`` are replaced with NaN.
+    ``ewm`` естественно даёт значения начиная с первого элемента; чтобы
+    сохранить семантику прогрева единой с :func:`sma`, значения до индекса
+    ``period - 1`` заменяются на NaN.
     """
     if period < 1:
         raise ValueError(f"period must be >= 1, got {period}")
@@ -42,16 +43,17 @@ def ema(close: pd.Series, period: int) -> pd.Series:
 
 
 def rsi(close: pd.Series, period: int = 14) -> pd.Series:
-    """Relative Strength Index, classic Wilder smoothing.
+    """Индекс относительной силы, классическое сглаживание по Уайлдеру.
 
-    Gains and losses are smoothed with ``ewm(alpha=1/period, adjust=False)``
-    (the recursive form of Wilder's averaging). Equivalent to
-    ``100 - 100 / (1 + rs)`` but written as ``100 * ag / (ag + al)`` to avoid
-    infinities when one side is exactly zero. Leading ``period`` values are
-    NaN; the first valid value sits at index ``period``.
+    Прибыли и убытки сглаживаются через ``ewm(alpha=1/period, adjust=False)``
+    (рекурсивная форма усреднения Уайлдера). Эквивалентно
+    ``100 - 100 / (1 + rs)``, но записано как ``100 * ag / (ag + al)``, чтобы
+    избежать бесконечностей, когда одна из сторон в точности нулевая. Первые
+    ``period`` значений — NaN; первое валидное значение стоит на индексе
+    ``period``.
 
-    On a flat market (every delta zero after warmup) both smoothed averages
-    are zero, so the result is NaN rather than a neutral 50.
+    На плоском рынке (все дельты нулевые после прогрева) оба сглаженных
+    средних равны нулю, поэтому результат — NaN, а не нейтральные 50.
     """
     if period < 1:
         raise ValueError(f"period must be >= 1, got {period}")
@@ -66,12 +68,12 @@ def rsi(close: pd.Series, period: int = 14) -> pd.Series:
 
 
 def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-    """Average True Range with Wilder smoothing.
+    """Средний истинный диапазон со сглаживанием по Уайлдеру.
 
-    True Range uses the previous close (``max(high - low,
-    |high - prev_close|, |low - prev_close|)``) and is smoothed with
-    ``ewm(alpha=1/period, adjust=False)``. Leading ``period`` values are NaN;
-    the first valid value sits at index ``period``.
+    Истинный диапазон использует предыдущее закрытие (``max(high - low,
+    |high - prev_close|, |low - prev_close|)``) и сглаживается через
+    ``ewm(alpha=1/period, adjust=False)``. Первые ``period`` значений — NaN;
+    первое валидное значение стоит на индексе ``period``.
     """
     if period < 1:
         raise ValueError(f"period must be >= 1, got {period}")
@@ -80,7 +82,7 @@ def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> 
         [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
         axis=1,
     ).max(axis=1)
-    tr.iloc[0] = np.nan  # True Range is undefined for the first candle
+    tr.iloc[0] = np.nan  # истинный диапазон не определён для первой свечи
     result = tr.ewm(alpha=1.0 / period, adjust=False).mean()
     result.iloc[:period] = np.nan
     return result

@@ -1,4 +1,4 @@
-"""Tests for vector indicators against hand-computed values."""
+"""Тесты векторных индикаторов на посчитанных вручную значениях."""
 
 from __future__ import annotations
 
@@ -27,8 +27,8 @@ class TestSma:
     def test_warmup_is_exactly_period_candles(self) -> None:
         result = sma(series([10.0] * 10), 5)
 
-        # The value is ready only after `period` candles: NaN at 0..period-2,
-        # first valid value at index period-1.
+        # Значение готово только после `period` свечей: NaN на 0..period-2,
+        # первое валидное значение на индексе period-1.
         assert result.iloc[:4].isna().all()
         assert not math.isnan(result.iloc[4])
         assert result.iloc[4] == pytest.approx(10.0)
@@ -53,7 +53,7 @@ class TestSma:
 
 class TestEma:
     def test_known_values(self) -> None:
-        # span=3 -> alpha=0.5; adjust=False recursion, hand-computed:
+        # span=3 -> alpha=0.5; рекурсия adjust=False, посчитано вручную:
         # 1, 1.5, 2.25, 3.125, 4.0625
         result = ema(series([1.0, 2.0, 3.0, 4.0, 5.0]), 3)
 
@@ -75,8 +75,8 @@ class TestEma:
 
 class TestRsi:
     def test_known_values(self) -> None:
-        # Hand-computed Wilder RSI with period=3 (alpha=1/3), closes
-        # [10, 11, 10, 11, 12]: avg_gain/avg_loss series give
+        # RSI по Уайлдеру с period=3 (alpha=1/3), посчитано вручную; закрытия
+        # [10, 11, 10, 11, 12]: ряды avg_gain/avg_loss дают
         # rsi[3] = 100 * (7/9) / (7/9 + 2/9) = 700/9,
         # rsi[4] = 100 * (23/27) / (23/27 + 4/27) = 2300/27.
         result = rsi(series([10.0, 11.0, 10.0, 11.0, 12.0]), 3)
@@ -105,7 +105,7 @@ class TestRsi:
 
 class TestAtr:
     def test_known_values(self) -> None:
-        # Hand-computed: TR = [nan, 3, 2, 3, 2]; Wilder ewm (alpha=1/3):
+        # Посчитано вручную: TR = [nan, 3, 2, 3, 2]; ewm по Уайлдеру (alpha=1/3):
         # atr[1]=3, atr[2]=2/3*3+2/3=8/3, atr[3]=2/3*8/3+1=25/9,
         # atr[4]=2/3*25/9+2/3=68/27.
         high = series([11.0, 13.0, 12.0, 14.0, 13.0])
@@ -119,8 +119,8 @@ class TestAtr:
         assert result.iloc[4] == pytest.approx(68.0 / 27.0)
 
     def test_constant_range_gives_constant_atr(self) -> None:
-        # Candles with high=close+1, low=close-1 and small close steps
-        # always have TR = 2, so ATR is exactly 2 after warmup.
+        # Свечи с high=close+1, low=close-1 и малыми шагами close всегда дают
+        # TR = 2, так что ATR после прогрева равен ровно 2.
         n = 10
         close = series([100.0 + 0.5 * i for i in range(n)])
         high = close + 1.0

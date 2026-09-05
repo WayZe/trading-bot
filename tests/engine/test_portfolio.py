@@ -1,4 +1,4 @@
-"""Tests for portfolio accounting."""
+"""Тесты учёта портфеля."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ class TestBuySellCycle:
 
         assert portfolio.cash == pytest.approx(10_000.0 - 200.0 - 0.2 + 220.0 - 0.22)
         assert portfolio.position is None
-        # pnl = 2 * (110 - 100) - 0.2 - 0.22 = 19.58 (net of both fees)
+        # pnl = 2 * (110 - 100) - 0.2 - 0.22 = 19.58 (нетто по обеим комиссиям)
         assert portfolio.realized_pnl == pytest.approx(19.58)
         assert len(portfolio.trades) == 1
         trade = portfolio.trades[0]
@@ -52,7 +52,7 @@ class TestBuySellCycle:
         assert trade.pnl == pytest.approx(19.58)
         assert trade.reason_entry == "sma cross up"
         assert trade.reason_exit == "sma cross down"
-        # cash after the round trip equals start plus realized pnl
+        # кэш после круговой сделки равен старту плюс реализованный pnl
         assert portfolio.cash == pytest.approx(10_000.0 + portfolio.realized_pnl)
 
     def test_losing_trade(self) -> None:

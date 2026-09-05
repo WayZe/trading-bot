@@ -1,4 +1,4 @@
-"""Research layer: parameter-grid sweeps and walk-forward analysis."""
+"""Исследовательский слой: sweep по сетке параметров и walk-forward анализ."""
 
 from trading_bot.research.sweep import (
     MAX_COMBINATIONS,

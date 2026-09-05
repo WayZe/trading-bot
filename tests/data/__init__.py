@@ -1,1 +1,1 @@
-"""Tests for the data layer."""
+"""Тесты слоя данных."""

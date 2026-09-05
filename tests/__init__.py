@@ -1,1 +1,1 @@
-"""Tests for the trading bot."""
+"""Тесты торгового бота."""
