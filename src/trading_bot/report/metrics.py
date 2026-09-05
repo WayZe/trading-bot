@@ -172,12 +172,20 @@ def benchmark_equity(close: pd.Series, start_cash: float) -> pd.Series:
     The full ``start_cash`` is invested at the first close; the curve is
     ``start_cash * close / close[0]`` over the same index. Pure function.
 
+    The model is deliberately naive: a single entry at the first close that
+    pays no fees and no slippage. When comparing against a backtest that
+    does pay them, the benchmark is systematically flattered — treat the
+    comparison as an optimistic lower bound for buy & hold.
+
     Raises:
-        ValueError: if ``close`` is empty or starts at zero.
+        ValueError: if ``close`` is empty, starts at zero, or its first
+            value is NaN.
     """
     if close.empty:
         raise ValueError("close series is empty: nothing to benchmark")
     first_close = float(close.iloc[0])
+    if math.isnan(first_close):
+        raise ValueError("first close is NaN: cannot build the benchmark curve")
     if first_close == 0.0:
         raise ValueError("first close is zero: cannot build the benchmark curve")
     return start_cash * close.astype("float64") / first_close

@@ -50,6 +50,32 @@ REASON_STOP_LOSS = "stop loss"
 REASON_TAKE_PROFIT = "take profit"
 
 
+def validate_candles(candles: pd.DataFrame) -> None:
+    """Validate the candle frame for the backtest engine.
+
+    Shared by :meth:`BacktestEngine.run` and the research sweep, which
+    validates its candles once before running the combinations.
+
+    Raises:
+        ValueError: if the candles are empty, miss required columns, contain
+            NaN values in required columns, or violate the ``high >= low``
+            invariant.
+    """
+    missing = [col for col in REQUIRED_COLUMNS if col not in candles.columns]
+    if missing:
+        raise ValueError(f"candles miss required columns: {missing}")
+    if candles.empty:
+        raise ValueError("candles are empty: nothing to backtest")
+    nan_columns = [col for col in REQUIRED_COLUMNS if candles[col].isna().any()]
+    if nan_columns:
+        raise ValueError(f"candles contain NaN values in columns: {nan_columns}")
+    inverted = candles["high"] < candles["low"]
+    if bool(inverted.any()):
+        raise ValueError(
+            f"candles contain {int(inverted.sum())} candle(s) where high < low"
+        )
+
+
 def _reanchor_below(
     level: float | None, ref_close: float | None, fill_price: float
 ) -> float | None:
@@ -142,23 +168,9 @@ class BacktestEngine:
         """Run the event loop over ``candles`` and return the result.
 
         Raises:
-            ValueError: if the candles are empty, miss required columns,
-                contain NaN values in required columns, or violate the
-                ``high >= low`` invariant.
+            ValueError: if the candles fail :func:`validate_candles`.
         """
-        missing = [col for col in REQUIRED_COLUMNS if col not in candles.columns]
-        if missing:
-            raise ValueError(f"candles miss required columns: {missing}")
-        if candles.empty:
-            raise ValueError("candles are empty: nothing to backtest")
-        nan_columns = [col for col in REQUIRED_COLUMNS if candles[col].isna().any()]
-        if nan_columns:
-            raise ValueError(f"candles contain NaN values in columns: {nan_columns}")
-        inverted = candles["high"] < candles["low"]
-        if bool(inverted.any()):
-            raise ValueError(
-                f"candles contain {int(inverted.sum())} candle(s) where high < low"
-            )
+        validate_candles(candles)
 
         n = len(candles)
         warmup = self.strategy.warmup_period
@@ -347,3 +359,24 @@ class BacktestEngine:
 
         logger.warning("unknown signal kind %r ignored", signal.kind)
         return pending
+
+
+def build_engine(cfg: BacktestConfig, strategy: Strategy) -> BacktestEngine:
+    """Create a :class:`BacktestEngine` fully configured from ``cfg``.
+
+    Single place where the execution stack (risk limits, broker fees and
+    slippage, start cash) is wired from a :class:`BacktestConfig`; shared by
+    the CLI backtest and the research sweep. The config is attached to the
+    engine, so the resulting :class:`BacktestResult` carries it back.
+    """
+    return BacktestEngine(
+        strategy=strategy,
+        risk=RiskManager(
+            position_size_pct=cfg.position_size_pct,
+            quantity_precision=cfg.quantity_precision,
+            min_notional=cfg.min_notional,
+        ),
+        broker=SimulatedBroker(fee_rate=cfg.fee_rate, slippage_bps=cfg.slippage_bps),
+        start_cash=cfg.start_cash,
+        config=cfg,
+    )

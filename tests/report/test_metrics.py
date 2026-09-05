@@ -237,6 +237,15 @@ class TestBenchmark:
         with pytest.raises(ValueError, match="empty"):
             benchmark_equity(close, 1000.0)
 
+    def test_benchmark_equity_nan_first_close_raises(self) -> None:
+        close = pd.Series(
+            [float("nan"), 75.0, 100.0],
+            index=pd.date_range("2024-01-01", periods=3, freq="D", tz="UTC"),
+        )
+
+        with pytest.raises(ValueError, match="NaN"):
+            benchmark_equity(close, 1000.0)
+
     def test_compute_benchmark_metrics_manual_series(self) -> None:
         # Closes grow +10%, -5%, +10% -> per-day returns 0.1, -0.05, 0.1.
         close = pd.Series(

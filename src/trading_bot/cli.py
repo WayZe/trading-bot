@@ -17,8 +17,7 @@ from trading_bot.config import BacktestConfig, load_config
 from trading_bot.data.downloader import EXCHANGE_ID, HistoryDownloader
 from trading_bot.data.exchange import ExchangeClient
 from trading_bot.data.storage import CandleStorage
-from trading_bot.engine.backtest import BacktestEngine, BacktestResult
-from trading_bot.engine.broker import SimulatedBroker
+from trading_bot.engine.backtest import BacktestResult, build_engine
 from trading_bot.report import (
     BenchmarkMetrics,
     MetricsReport,
@@ -28,7 +27,7 @@ from trading_bot.report import (
 )
 from trading_bot.report.plots import plot_equity, plot_trades
 from trading_bot.research import run_sweep, slice_candles
-from trading_bot.risk import RiskManager
+from trading_bot.research.sweep import METRIC_COLUMNS
 from trading_bot.strategy import create_strategy
 
 logger = logging.getLogger(__name__)
@@ -41,6 +40,9 @@ LAST_RUN_DIR = REPORTS_DIR / "last_run"
 SWEEP_DIR = REPORTS_DIR / "sweep" / "last"
 
 RUN_FILES = ("equity.parquet", "trades.csv", "meta.json")
+
+# Grid names that would collide with sweep result columns.
+_RESERVED_PARAM_NAMES = frozenset(METRIC_COLUMNS) | {"error"}
 
 
 def _setup_logging() -> None:
@@ -124,17 +126,7 @@ def backtest(
         typer.echo(f"Ошибка конфигурации стратегии: {error}")
         raise typer.Exit(code=1) from error
 
-    engine = BacktestEngine(
-        strategy=strategy,
-        risk=RiskManager(
-            position_size_pct=cfg.position_size_pct,
-            quantity_precision=cfg.quantity_precision,
-            min_notional=cfg.min_notional,
-        ),
-        broker=SimulatedBroker(fee_rate=cfg.fee_rate, slippage_bps=cfg.slippage_bps),
-        start_cash=cfg.start_cash,
-        config=cfg,
-    )
+    engine = build_engine(cfg, strategy)
     result = engine.run(candles)
 
     # Buy & hold benchmark over exactly the tested range (the candle slice
@@ -168,14 +160,20 @@ def _apply_overrides(
         raise typer.Exit(code=1) from error
 
 
-def _load_candles_for_period(cfg: BacktestConfig) -> pd.DataFrame:
-    """Load candles for the config symbol/timeframe sliced to the period.
+def _load_candles(cfg: BacktestConfig) -> pd.DataFrame:
+    """Load the raw candle dataset for the config symbol/timeframe.
 
-    Exits with a user-facing hint when the dataset is missing or the period
-    is empty. Shared by the ``backtest`` and ``sweep`` commands.
+    Exits with a user-facing hint when the dataset is missing or the symbol
+    is not a valid ccxt pair. Shared by the ``backtest`` and ``sweep``
+    commands.
     """
     storage = CandleStorage(DATA_ROOT)
-    candles = storage.load(EXCHANGE_ID, cfg.symbol, cfg.timeframe)
+    try:
+        candles = storage.load(EXCHANGE_ID, cfg.symbol, cfg.timeframe)
+    except ValueError as error:
+        # symbol_to_slug rejects symbols that could escape the storage root.
+        typer.echo(f"Некорректная пара {cfg.symbol!r}: {error}")
+        raise typer.Exit(code=1) from error
     if candles is None:
         path = storage.path_for(EXCHANGE_ID, cfg.symbol, cfg.timeframe)
         typer.echo(
@@ -184,7 +182,16 @@ def _load_candles_for_period(cfg: BacktestConfig) -> pd.DataFrame:
             f"--symbol {cfg.symbol} --timeframe {cfg.timeframe} --since <YYYY-MM-DD>"
         )
         raise typer.Exit(code=1)
+    return candles
 
+
+def _load_candles_for_period(cfg: BacktestConfig) -> pd.DataFrame:
+    """Load candles for the config symbol/timeframe sliced to the period.
+
+    The ``sweep`` command loads via :func:`_load_candles` instead and lets
+    :func:`run_sweep` do the single slice.
+    """
+    candles = _load_candles(cfg)
     sliced = slice_candles(candles, cfg)
     if sliced.empty:
         typer.echo(
@@ -200,7 +207,8 @@ def _parse_grid(specs: list[str] | None) -> dict[str, list]:
 
     Values are coerced: int-like strings become ``int``, other numeric
     strings become ``float``, anything else stays a string. The strategy
-    constructor validates the final types and values.
+    constructor validates the final types and values. Names that collide
+    with sweep result columns (metrics and ``error``) are rejected.
     """
     if not specs:
         return {}
@@ -213,6 +221,11 @@ def _parse_grid(specs: list[str] | None) -> dict[str, list]:
             raise typer.BadParameter(f"--param expects 'name=v1,v2,...', got {spec!r}")
         if name in grid:
             raise typer.BadParameter(f"--param {name!r} задан дважды")
+        if name in _RESERVED_PARAM_NAMES:
+            raise typer.BadParameter(
+                f"--param {name!r} конфликтует с колонкой результата sweep; "
+                "выбери другое имя параметра"
+            )
         grid[name] = [_coerce_scalar(item) for item in values]
     return grid
 
@@ -269,7 +282,7 @@ def sweep(
         )
         raise typer.Exit(code=1)
 
-    candles = _load_candles_for_period(cfg)
+    candles = _load_candles(cfg)
 
     try:
         results = run_sweep(cfg, grid, candles)

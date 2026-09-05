@@ -14,6 +14,7 @@ from trading_bot.engine.backtest import BacktestEngine
 from trading_bot.engine.broker import SimulatedBroker
 from trading_bot.report.metrics import compute_metrics
 from trading_bot.research import expand_grid, run_sweep, slice_candles
+from trading_bot.research import sweep as sweep_module
 from trading_bot.risk import RiskManager
 from trading_bot.strategy import create_strategy
 
@@ -89,6 +90,12 @@ class TestSliceCandles:
         assert sliced["timestamp"].iloc[-1] == pd.Timestamp(
             "2025-08-03 20:00", tz="UTC"
         )
+
+    def test_empty_candles_raise(self) -> None:
+        empty = rows_to_df([])
+
+        with pytest.raises(ValueError, match="no candles"):
+            slice_candles(empty, BacktestConfig(start="2025-08-01"))
 
 
 class TestRunSweep:
@@ -168,6 +175,49 @@ class TestRunSweep:
 
         with pytest.raises(ValueError, match="200"):
             run_sweep(cfg, {"fast": list(range(201))}, make_candles_df(10))
+
+    def test_grid_product_above_limit_raises_before_expansion(self) -> None:
+        cfg = make_config()
+        grid = {"fast": list(range(15)), "slow": list(range(15))}  # 15 * 15 = 225
+
+        with pytest.raises(ValueError, match="225"):
+            run_sweep(cfg, grid, make_candles_df(10))
+
+    def test_runtime_error_combo_becomes_error_row(self, monkeypatch) -> None:
+        cfg = make_config()
+        candles = make_candles_df(120)
+        real_create = sweep_module.create_strategy
+
+        def flaky_create(name, params):
+            if params.get("slow") == 12:
+                raise RuntimeError("portfolio exploded")
+            return real_create(name, params)
+
+        monkeypatch.setattr(sweep_module, "create_strategy", flaky_create)
+
+        results = run_sweep(cfg, {"slow": [6, 12]}, candles)
+
+        assert len(results) == 2
+        ok = results[results["error"].isna()]
+        failed = results[results["error"].notna()]
+        assert len(ok) == 1 and ok.iloc[0]["slow"] == 6
+        assert len(failed) == 1 and failed.iloc[0]["slow"] == 12
+        assert "portfolio exploded" in failed.iloc[0]["error"]
+        assert math.isnan(failed.iloc[0]["total_return_pct"])
+
+    def test_invalid_candles_raise_before_the_combination_loop(self) -> None:
+        cfg = make_config()
+        candles = make_candles_df(120)
+        candles.loc[0, "high"] = float("nan")
+
+        with pytest.raises(ValueError, match="NaN"):
+            run_sweep(cfg, {"fast": [3, 5]}, candles)
+
+    def test_empty_candles_raise(self) -> None:
+        cfg = make_config()
+
+        with pytest.raises(ValueError, match="no candles"):
+            run_sweep(cfg, {"fast": [3]}, rows_to_df([]))
 
     def test_empty_period_raises(self) -> None:
         cfg = make_config(start="2030-01-01")

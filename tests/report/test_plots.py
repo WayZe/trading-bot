@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from trading_bot.report import plots
 from trading_bot.report.plots import plot_equity, plot_trades
 
 
@@ -54,17 +55,27 @@ def test_plot_equity_creates_non_empty_png(tmp_path: Path) -> None:
     assert path.stat().st_size > 0
 
 
-def test_plot_equity_with_benchmark_overlay(tmp_path: Path) -> None:
+def test_plot_equity_with_benchmark_overlay(tmp_path: Path, monkeypatch) -> None:
     path = tmp_path / "equity.png"
     index = pd.date_range("2025-08-01", periods=50, freq="4h", tz="UTC")
     benchmark = pd.Series(
         [10_000.0 + 20.0 * i for i in range(50)], index=index, name="equity"
     )
 
-    plot_equity(make_equity(), path, benchmark=benchmark)
+    # plot_equity closes its figure; keep it open to inspect the drawn lines.
+    monkeypatch.setattr(plots.plt, "close", lambda *args, **kwargs: None)
+    try:
+        plot_equity(make_equity(), path, benchmark=benchmark)
+        ax = plots.plt.gcf().axes[0]
+        labels = [line.get_label() for line in ax.get_lines()]
+    finally:
+        plots.plt.close("all")
 
     assert path.exists()
     assert path.stat().st_size > 0
+    assert len(ax.get_lines()) == 2
+    assert "Стратегия" in labels
+    assert "Buy & hold" in labels
 
 
 def test_plot_trades_creates_non_empty_png(tmp_path: Path) -> None:

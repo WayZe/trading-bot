@@ -230,6 +230,20 @@ def test_backtest_with_missing_config_fails() -> None:
     assert result.exit_code != 0
 
 
+def test_backtest_with_path_escaping_symbol_fails_cleanly(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = tmp_path / "backtest.yaml"
+    config.write_text('start: "2025-07-01"\n', encoding="utf-8")
+
+    result = runner.invoke(app, ["backtest", "--config", str(config), "--symbol", "../evil"])
+
+    assert result.exit_code == 1
+    assert "Некорректная пара" in result.output
+    assert "Traceback" not in result.output
+
+
 SWEEP_CONFIG = (
     'start: "2025-07-01"\n'
     "strategy: sma_cross\n"
@@ -328,6 +342,37 @@ class TestSweep:
         assert "конечным" in result.output
         assert "Traceback" not in result.output
 
+    def test_result_column_param_name_fails_cleanly(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        config = tmp_path / "backtest.yaml"
+        config.write_text(SWEEP_CONFIG, encoding="utf-8")
+
+        result = runner.invoke(
+            app, ["sweep", "--config", str(config), "--param", "sharpe=1"]
+        )
+
+        assert result.exit_code != 0
+        assert "колонкой результата" in result.output
+        assert "Traceback" not in result.output
+
+    def test_all_combinations_invalid_still_reports(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        _prepare_data(tmp_path, n_candles=120)
+        config = tmp_path / "backtest.yaml"
+        config.write_text(SWEEP_CONFIG, encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            ["sweep", "--config", str(config), "--param", "fast=10,20", "--param", "slow=6"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Ни одна комбинация не выполнилась успешно" in result.output
+
 
 class TestParseGrid:
     def test_coerces_int_float_and_str(self) -> None:
@@ -349,6 +394,13 @@ class TestParseGrid:
 
         with pytest.raises(BadParameter, match="конечным"):
             _parse_grid([spec])
+
+    @pytest.mark.parametrize("name", ["sharpe", "total_return_pct", "error", "final_equity"])
+    def test_result_column_names_fail(self, name: str) -> None:
+        from typer import BadParameter
+
+        with pytest.raises(BadParameter, match="колонкой результата"):
+            _parse_grid([f"{name}=1"])
 
 
 class TestSymbolTimeframeOverrides:

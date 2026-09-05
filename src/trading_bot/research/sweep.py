@@ -10,10 +10,8 @@ from typing import Any
 import pandas as pd
 
 from trading_bot.config import BacktestConfig
-from trading_bot.engine.backtest import BacktestEngine
-from trading_bot.engine.broker import SimulatedBroker
+from trading_bot.engine.backtest import build_engine, validate_candles
 from trading_bot.report.metrics import compute_metrics
-from trading_bot.risk import RiskManager
 from trading_bot.strategy import create_strategy
 
 logger = logging.getLogger(__name__)
@@ -54,7 +52,12 @@ def slice_candles(candles: pd.DataFrame, cfg: BacktestConfig) -> pd.DataFrame:
 
     Shared by the CLI backtest and research sweeps so both run over exactly
     the same period for a given config.
+
+    Raises:
+        ValueError: if ``candles`` is empty.
     """
+    if candles.empty:
+        raise ValueError("no candles to slice: the dataset is empty")
     ts = candles["timestamp"]
     start_ts = pd.Timestamp(cfg.start, tz="UTC")
     if ts.iloc[0] > start_ts:
@@ -78,11 +81,13 @@ def run_sweep(
 
     Each combination overrides ``base_config.strategy_params``; everything
     else (period, fees, slippage, risk limits, start cash) comes from
-    ``base_config``. The candles are sliced to the config period first (same
-    semantics as the CLI backtest).
+    ``base_config`` via :func:`build_engine`. The candles are sliced to the
+    config period first (same semantics as the CLI backtest) and validated
+    once before the combination loop.
 
     A combination that fails to build or run (e.g. ``fast >= slow``) does not
-    abort the sweep: its row carries the exception text in ``error`` and NaN
+    abort the sweep: any exception is caught, logged with its traceback at
+    debug level, and the row carries a brief error text in ``error`` with NaN
     metrics.
 
     Returns:
@@ -92,20 +97,23 @@ def run_sweep(
 
     Raises:
         ValueError: if the grid expands to more than :data:`MAX_COMBINATIONS`
-            combinations or no candles remain after the period slice.
+            combinations, ``candles`` is empty, or no candles remain after
+            the period slice (including invalid candle data).
     """
-    combos = expand_grid(param_grid)
-    if len(combos) > MAX_COMBINATIONS:
+    n_combinations = math.prod(len(values) for values in param_grid.values()) or 1
+    if n_combinations > MAX_COMBINATIONS:
         raise ValueError(
-            f"parameter grid expands to {len(combos)} combinations, "
+            f"parameter grid expands to {n_combinations} combinations, "
             f"above the limit of {MAX_COMBINATIONS}; narrow the grid"
         )
+    combos = expand_grid(param_grid)
     sliced = slice_candles(candles, base_config)
     if sliced.empty:
         raise ValueError(
             f"no candles in the requested period "
             f"{base_config.start} .. {base_config.end or 'latest available'}"
         )
+    validate_candles(sliced)
     rows = [_run_combination(base_config, combo, sliced) for combo in combos]
     return pd.DataFrame(rows, columns=[*param_grid, *METRIC_COLUMNS, "error"])
 
@@ -113,29 +121,18 @@ def run_sweep(
 def _run_combination(
     base_config: BacktestConfig, combo: dict, candles: pd.DataFrame
 ) -> dict[str, Any]:
-    """Run one sweep combination; a failure becomes an ``error`` row."""
+    """Run one sweep combination; any failure becomes an ``error`` row."""
     row: dict[str, Any] = dict(combo)
     params = {**base_config.strategy_params, **combo}
     try:
         strategy = create_strategy(base_config.strategy, params)
-        engine = BacktestEngine(
-            strategy=strategy,
-            risk=RiskManager(
-                position_size_pct=base_config.position_size_pct,
-                quantity_precision=base_config.quantity_precision,
-                min_notional=base_config.min_notional,
-            ),
-            broker=SimulatedBroker(
-                fee_rate=base_config.fee_rate, slippage_bps=base_config.slippage_bps
-            ),
-            start_cash=base_config.start_cash,
-        )
+        engine = build_engine(base_config, strategy)
         result = engine.run(candles)
         metrics = compute_metrics(result.equity_curve, result.trades, base_config.timeframe)
-    except (TypeError, ValueError) as error:
-        logger.warning("sweep combination %s failed: %s", combo, error)
+    except Exception as error:  # noqa: BLE001 - one bad combo must not kill the sweep
+        logger.debug("sweep combination %s failed", combo, exc_info=True)
         row.update(dict.fromkeys(METRIC_COLUMNS, math.nan))
-        row["error"] = str(error)
+        row["error"] = str(error) or type(error).__name__
         return row
     row.update(
         total_return_pct=metrics.total_return_pct,
