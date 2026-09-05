@@ -25,8 +25,15 @@
 Требуется [uv](https://docs.astral.sh/uv/) и Python 3.12+.
 
 ```bash
-uv sync
+uv sync          # или: make sync
+uv run pytest    # или: make test
+uv run ruff check .
 ```
+
+Типовые команды продублированы make-целями: `make download` (SYMBOL/TIMEFRAME/SINCE),
+`make backtest`, `make report`, `make sweep`, `make walkforward`, `make smoke`
+(backtest + report), `make help` — полный список. Docker — см. раздел
+[«Docker»](#docker) ниже.
 
 Дальше три команды: скачать историю → прогнать бэктест → посмотреть отчёт.
 
@@ -249,6 +256,32 @@ strategy_params:
 uv run pytest          # тесты (офлайн, сеть не нужна)
 uv run ruff check .    # линтер
 ```
+
+## Docker
+
+Образ собирается на базе `python:3.12-slim` с [uv](https://docs.astral.sh/uv/);
+слой зависимостей кешируется отдельно от кода, `ENTRYPOINT` — CLI
+`trading-bot`, так что команда передаётся прямо в `docker run`.
+
+```bash
+make docker-build   # или: docker build -t trading-bot .
+docker run --rm trading-bot --help
+```
+
+Бэктест внутри контейнера на локальных данных/конфиге (каталоги монтируются,
+артефакты остаются на хосте):
+
+```bash
+docker run --rm \
+  -v $(PWD)/data:/app/data \
+  -v $(PWD)/reports:/app/reports \
+  -v $(PWD)/config:/app/config \
+  trading-bot backtest --config config/backtest.yaml
+```
+
+То же через make: `make docker-run CMD="backtest --config config/backtest.yaml"`
+(без `CMD=` показывает `--help`). Для загрузки данных из контейнера нужен
+доступ к сети: `make docker-run CMD="download --symbol BTC/USDT --timeframe 4h --since 2024-01-01"`.
 
 ## Структура репозитория
 
