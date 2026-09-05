@@ -107,9 +107,15 @@ def backtest(
     config: Annotated[
         Path, typer.Option(help="Path to the backtest YAML config.")
     ] = Path("config/backtest.yaml"),
+    symbol: Annotated[
+        str | None, typer.Option(help="Переопределить пару из конфига, напр. ETH/USDT.")
+    ] = None,
+    timeframe: Annotated[
+        str | None, typer.Option(help="Переопределить таймфрейм из конфига, напр. 1h.")
+    ] = None,
 ) -> None:
     """Run a backtest over stored candles and save run artifacts."""
-    cfg = load_config(config)
+    cfg = _apply_overrides(load_config(config), symbol, timeframe)
     candles = _load_candles_for_period(cfg)
 
     try:
@@ -138,6 +144,28 @@ def backtest(
     summary = _summary(cfg, result)
     _print_summary(summary)
     _save_artifacts(result, benchmark, cfg, summary)
+
+
+def _apply_overrides(
+    cfg: BacktestConfig, symbol: str | None, timeframe: str | None
+) -> BacktestConfig:
+    """Apply CLI symbol/timeframe overrides (``None`` keeps the config value).
+
+    The config is revalidated so a bad override (e.g. a malformed timeframe)
+    fails with the standard validation message.
+    """
+    updates: dict[str, str] = {}
+    if symbol is not None:
+        updates["symbol"] = symbol
+    if timeframe is not None:
+        updates["timeframe"] = timeframe
+    if not updates:
+        return cfg
+    try:
+        return BacktestConfig.model_validate({**cfg.model_dump(), **updates})
+    except ValueError as error:
+        typer.echo(f"Ошибка переопределения конфига: {error}")
+        raise typer.Exit(code=1) from error
 
 
 def _load_candles_for_period(cfg: BacktestConfig) -> pd.DataFrame:
@@ -214,9 +242,15 @@ def sweep(
             "--param fast=10,15,20 --param slow=30,50.",
         ),
     ] = None,
+    symbol: Annotated[
+        str | None, typer.Option(help="Переопределить пару из конфига, напр. ETH/USDT.")
+    ] = None,
+    timeframe: Annotated[
+        str | None, typer.Option(help="Переопределить таймфрейм из конфига, напр. 1h.")
+    ] = None,
 ) -> None:
     """Прогнать бэктест по сетке параметров стратегии и свести результаты."""
-    cfg = load_config(config)
+    cfg = _apply_overrides(load_config(config), symbol, timeframe)
     grid = _parse_grid(param)
     if not grid:
         typer.echo(

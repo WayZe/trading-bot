@@ -53,7 +53,15 @@ uv run trading-bot download --symbol BTC/USDT --timeframe 4h --update
 uv run trading-bot backtest --config config/backtest.yaml
 ```
 
-Артефакты прогона (кривая эквити, сделки, meta) пишутся в `reports/last_run/`.
+Пару и таймфрейм из конфига можно переопределить флагами — данные берутся из
+соответствующего датасета:
+
+```bash
+uv run trading-bot backtest --config config/backtest.yaml --symbol ETH/USDT --timeframe 1h
+```
+
+Артефакты прогона (кривая эквити, сделки, бенчмарк buy & hold, meta) пишутся
+в `reports/last_run/`.
 
 **3. Посмотреть отчёт** — таблица метрик + графики:
 
@@ -63,13 +71,29 @@ uv run trading-bot report
 
 Команда читает артефакты из `reports/last_run/`, печатает метрики (доходность,
 CAGR, Шарп, просадка, winrate, profit factor, комиссии, ...) и сохраняет
-`reports/last_run/equity.png` (эквити + просадка) и `reports/last_run/trades.png`
-(сделки на графике цены). Свечи для графика сделок ищутся автоматически в
-`data/`; можно указать файл явно:
+`reports/last_run/equity.png` (эквити + просадка + оверлей buy & hold) и
+`reports/last_run/trades.png` (сделки на графике цены). Рядом с основной
+таблицей выводится сравнение «Стратегия vs Buy & hold» (доходность, CAGR,
+макс. просадка, Шарп) за тот же период. Свечи для графика сделок ищутся
+автоматически в `data/`; можно указать файл явно:
 
 ```bash
 uv run trading-bot report --run-dir reports/last_run --candles data/bybit/BTC_USDT/4h.parquet
 ```
+
+**4. Перебор параметров стратегии (sweep)** — сетка `--param имя=v1,v2,...`
+(повторяемый флаг), всё остальное берётся из конфига:
+
+```bash
+uv run trading-bot sweep --config config/backtest.yaml \
+  --param fast=10,15,20 --param slow=30,50
+```
+
+Невалидные комбинации (например `fast >= slow`) не прерывают прогон — они
+попадают в результаты с текстом ошибки. Результаты пишутся в
+`reports/sweep/last/results.csv` (все комбинации и метрики) и печатаются
+таблицей с лучшей комбинацией по доходности. Для больших сеток в таблице
+показываются только топ-10, полные результаты — в CSV.
 
 ## Архитектура
 
@@ -77,7 +101,7 @@ uv run trading-bot report --run-dir reports/last_run --candles data/bybit/BTC_US
 
 ```
 src/trading_bot/
-  cli.py           CLI (typer): download, backtest, report
+  cli.py           CLI (typer): download, backtest, report, sweep
   config.py        pydantic-модель конфига бэктеста (config/backtest.yaml)
   indicators.py    векторные индикаторы: sma, ema, rsi, atr
   risk.py          размер позиции (доля equity, min_notional, округление)
@@ -87,6 +111,7 @@ src/trading_bot/
                    (кэш, позиция, TradeRecord), backtest (event loop)
   strategy/        плагины стратегий: base (Signal/Fill/Strategy ABC),
                    sma_cross, реестр по имени
+  research/        слой исследований: sweep по сетке параметров
   report/          метрики прогона (metrics.py) и графики (plots.py)
 ```
 

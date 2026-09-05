@@ -328,6 +328,94 @@ class TestParseGrid:
             _parse_grid(["fast=1", "fast=2"])
 
 
+class TestSymbolTimeframeOverrides:
+    ETH_CONFIG = 'start: "2025-07-01"\nsymbol: BTC/USDT\ntimeframe: 4h\n'
+
+    def test_backtest_symbol_override_uses_other_dataset(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        CandleStorage(tmp_path / "data").save(
+            "bybit", "ETH/USDT", "4h", rows_to_df(make_candles(60))
+        )
+        config = tmp_path / "backtest.yaml"
+        config.write_text(self.ETH_CONFIG, encoding="utf-8")
+
+        result = runner.invoke(
+            app, ["backtest", "--config", str(config), "--symbol", "ETH/USDT"]
+        )
+
+        assert result.exit_code == 0, result.output
+        meta = json.loads(
+            (tmp_path / "reports" / "last_run" / "meta.json").read_text(encoding="utf-8")
+        )
+        assert meta["config"]["symbol"] == "ETH/USDT"
+        assert meta["config"]["timeframe"] == "4h"
+        assert meta["summary"]["n_candles"] == 60
+
+    def test_backtest_timeframe_override(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        CandleStorage(tmp_path / "data").save(
+            "bybit", "BTC/USDT", "1h", rows_to_df(make_candles(60))
+        )
+        config = tmp_path / "backtest.yaml"
+        config.write_text(self.ETH_CONFIG, encoding="utf-8")
+
+        result = runner.invoke(
+            app, ["backtest", "--config", str(config), "--timeframe", "1h"]
+        )
+
+        assert result.exit_code == 0, result.output
+        meta = json.loads(
+            (tmp_path / "reports" / "last_run" / "meta.json").read_text(encoding="utf-8")
+        )
+        assert meta["config"]["timeframe"] == "1h"
+
+    def test_backtest_invalid_timeframe_override_fails(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        _prepare_data(tmp_path)
+        config = tmp_path / "backtest.yaml"
+        config.write_text(self.ETH_CONFIG, encoding="utf-8")
+
+        result = runner.invoke(
+            app, ["backtest", "--config", str(config), "--timeframe", "7x"]
+        )
+
+        assert result.exit_code == 1
+        assert "переопределения" in result.output
+
+    def test_sweep_symbol_override(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        CandleStorage(tmp_path / "data").save(
+            "bybit", "SOL/USDT", "4h", rows_to_df(make_candles(120))
+        )
+        config = tmp_path / "backtest.yaml"
+        config.write_text(self.ETH_CONFIG, encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            [
+                "sweep",
+                "--config",
+                str(config),
+                "--symbol",
+                "SOL/USDT",
+                "--param",
+                "fast=3",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        meta = json.loads(
+            (tmp_path / "reports" / "sweep" / "last" / "meta.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert meta["config"]["symbol"] == "SOL/USDT"
+
+
 class TestDownloadSince:
     def test_download_without_since_and_without_update_fails(
         self, tmp_path: Path, monkeypatch
