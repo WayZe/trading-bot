@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from pathlib import Path
 from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+# ccxt-style timeframe: one or more digits followed by m/h/d (e.g. 15m, 4h, 1d).
+_TIMEFRAME_PATTERN = re.compile(r"^(\d+)([mhd])$")
+_TIMEFRAME_UNIT_MS = {"m": 60_000, "h": 3_600_000, "d": 86_400_000}
+_MAX_TIMEFRAME_MS = 86_400_000  # 1d
 
 
 class BacktestConfig(BaseModel):
@@ -41,6 +47,21 @@ class BacktestConfig(BaseModel):
     min_notional: float = Field(default=5.0, ge=0.0)
     strategy: str = "sma_cross"
     strategy_params: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("timeframe")
+    @classmethod
+    def _validate_timeframe(cls, value: str) -> str:
+        """Ensure the timeframe is a ccxt-style ``<count><m|h|d>`` of at most 1d."""
+        match = _TIMEFRAME_PATTERN.fullmatch(value)
+        if match is None:
+            raise ValueError(
+                f"timeframe must be '<count><m|h|d>' in ccxt style, "
+                f"e.g. '15m', '4h', '1d'; got {value!r}"
+            )
+        count, unit = int(match.group(1)), match.group(2)
+        if count * _TIMEFRAME_UNIT_MS[unit] > _MAX_TIMEFRAME_MS:
+            raise ValueError(f"timeframe must not exceed 1d; got {value!r}")
+        return value
 
     @field_validator("start", "end")
     @classmethod

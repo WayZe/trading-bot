@@ -22,10 +22,34 @@ logger = logging.getLogger(__name__)
 
 EXCHANGE_ID = "bybit"
 BATCH_SIZE = 1000
-MAX_ATTEMPTS = 5
+MAX_ATTEMPTS = 6
 MAX_BACKOFF_SECONDS = 16
 PROGRESS_EVERY_BATCHES = 10
-RETRYABLE_ERRORS: tuple[type[Exception], ...] = (ccxt.NetworkError, ccxt.RateLimitExceeded)
+# RateLimitExceeded inherits from NetworkError in ccxt, so it is covered too.
+RETRYABLE_ERRORS: tuple[type[Exception], ...] = (ccxt.NetworkError,)
+
+
+def _now_ms() -> int:
+    """Current UTC time in milliseconds since the epoch."""
+    return int(datetime.now(UTC).timestamp() * 1000)
+
+
+def _drop_open_candles(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """Drop candles whose bucket is still open.
+
+    A candle is closed iff ``timestamp + timeframe_ms <= now``; the
+    still-forming last candle must never enter the dataset (it would poison
+    both the gap validation and the backtest).
+    """
+    tf_ms = timeframe_to_ms(timeframe)
+    cutoff = pd.Timestamp(_now_ms(), unit="ms", tz="UTC")
+    is_closed = (df["timestamp"] + pd.Timedelta(milliseconds=tf_ms)) <= cutoff
+    dropped = int((~is_closed).sum())
+    if dropped:
+        logger.info(
+            "dropped %d still-open candle(s): their buckets have not closed yet", dropped
+        )
+    return df.loc[is_closed].reset_index(drop=True)
 
 
 def _as_date(value: date | str, *, name: str, default: date | None = None) -> date:
@@ -77,9 +101,10 @@ class HistoryDownloader:
     ) -> pd.DataFrame:
         """Download candles for ``[since, until)`` (UTC dates).
 
-        ``until`` defaults to the current UTC date. Raises ``ValueError`` if the
-        exchange returns no data at all or if validation fails even after gap
-        backfilling.
+        ``until`` defaults to the current UTC date. Candles whose bucket is
+        still open (``timestamp + timeframe > now``) are dropped: only closed
+        candles are returned. Raises ``ValueError`` if the exchange returns no
+        data at all or if validation fails even after gap backfilling.
         """
         since_date = _as_date(since, name="since")
         until_date = _as_date(until, name="until", default=datetime.now(UTC).date())
@@ -96,8 +121,11 @@ class HistoryDownloader:
         """Fetch candles from the last stored one up to now and merge them.
 
         The last stored candle is re-fetched as well, because it may have been
-        written while still open. Raises ``FileNotFoundError`` if there is no
-        stored dataset yet (run a full download first).
+        written while still open; the still-open tail is dropped before
+        saving, so only closed candles ever reach the dataset. Raises
+        ``FileNotFoundError`` if there is no stored dataset yet (run a full
+        download first) and ``ValueError`` if validation fails after the
+        merge.
         """
         existing = storage.load(EXCHANGE_ID, symbol, timeframe)
         if existing is None or existing.empty:
@@ -106,7 +134,7 @@ class HistoryDownloader:
                 "run a full download first"
             )
         last_ms = int(existing["timestamp"].iloc[-1].value // 1_000_000)
-        now_ms = int(datetime.now(UTC).timestamp() * 1000)
+        now_ms = _now_ms()
         logger.info(
             "updating %s %s from %s to now", symbol, timeframe, _ms_to_iso(last_ms)
         )
@@ -114,9 +142,9 @@ class HistoryDownloader:
         combined = storage.append(EXCHANGE_ID, symbol, timeframe, tail)
         problems = validate_ohlcv(combined, timeframe)
         if problems:
-            logger.warning(
-                "dataset has validation problems after update:\n- %s",
-                "\n- ".join(problems),
+            raise ValueError(
+                f"OHLCV validation failed for {symbol} {timeframe} after update:\n- "
+                + "\n- ".join(problems)
             )
         return combined
 
@@ -135,6 +163,13 @@ class HistoryDownloader:
             )
         df = normalize_ohlcv(_rows_to_df(rows))
         df = self._backfill_gaps(symbol, timeframe, df, until_ms)
+        df = _drop_open_candles(df, timeframe)
+        if df.empty:
+            raise ValueError(
+                f"no closed candles available for {symbol} {timeframe} "
+                f"in [{_ms_to_iso(since_ms)}, {_ms_to_iso(until_ms)}): "
+                "the last bucket is still open"
+            )
         problems = validate_ohlcv(df, timeframe)
         if problems:
             raise ValueError(

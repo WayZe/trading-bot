@@ -49,6 +49,9 @@ def rsi(close: pd.Series, period: int = 14) -> pd.Series:
     ``100 - 100 / (1 + rs)`` but written as ``100 * ag / (ag + al)`` to avoid
     infinities when one side is exactly zero. Leading ``period`` values are
     NaN; the first valid value sits at index ``period``.
+
+    On a flat market (every delta zero after warmup) both smoothed averages
+    are zero, so the result is NaN rather than a neutral 50.
     """
     if period < 1:
         raise ValueError(f"period must be >= 1, got {period}")

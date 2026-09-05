@@ -201,3 +201,46 @@ def test_backtest_with_missing_config_fails() -> None:
     result = runner.invoke(app, ["backtest", "--config", "/nonexistent/config.yaml"])
 
     assert result.exit_code != 0
+
+
+class TestDownloadSince:
+    def test_download_without_since_and_without_update_fails(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+
+        result = runner.invoke(app, ["download", "--symbol", "BTC/USDT", "--timeframe", "1h"])
+
+        assert result.exit_code == 1
+        assert "--since" in result.output
+
+    def test_download_update_without_since_and_no_dataset_fails(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+
+        result = runner.invoke(
+            app, ["download", "--symbol", "BTC/USDT", "--timeframe", "1h", "--update"]
+        )
+
+        assert result.exit_code == 1
+        assert "--since" in result.output
+
+    def test_download_update_without_since_uses_existing_dataset(
+        self, tmp_path: Path, monkeypatch, mocker
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        df = rows_to_df(make_candles(5))
+        CandleStorage(tmp_path / "data").save("bybit", "BTC/USDT", "1h", df)
+        downloader_cls = mocker.patch("trading_bot.cli.HistoryDownloader")
+        downloader_cls.return_value.update.return_value = df
+        mocker.patch("trading_bot.cli.ExchangeClient")
+
+        result = runner.invoke(
+            app, ["download", "--symbol", "BTC/USDT", "--timeframe", "1h", "--update"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Updating" in result.output
+        downloader_cls.return_value.update.assert_called_once()
+        downloader_cls.return_value.download.assert_not_called()

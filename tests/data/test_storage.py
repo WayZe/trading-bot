@@ -24,6 +24,11 @@ class TestStoragePaths:
         assert symbol_to_slug("BTC/USDT") == "BTC_USDT"
         assert symbol_to_slug("ETH/USDT") == "ETH_USDT"
 
+    def test_symbol_to_slug_rejects_traversal_and_empty_parts(self) -> None:
+        for bad in ("", "..", "../BTC", "BTC/../USDT", "BTC//USDT", "/BTC"):
+            with pytest.raises(ValueError, match="invalid symbol"):
+                symbol_to_slug(bad)
+
     def test_path_for(self, storage, tmp_path) -> None:
         path = storage.path_for("bybit", "BTC/USDT", "4h")
         assert path == tmp_path / "bybit" / "BTC_USDT" / "4h.parquet"

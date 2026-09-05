@@ -54,8 +54,12 @@ def download(
     symbol: Annotated[str, typer.Option(help="Trading pair in ccxt format, e.g. BTC/USDT.")],
     timeframe: Annotated[str, typer.Option(help="Candle timeframe: 15m, 1h, 4h, 1d, ...")] = "4h",
     since: Annotated[
-        str, typer.Option(help="Start date (UTC, YYYY-MM-DD) for a full download.")
-    ] = ...,
+        str | None,
+        typer.Option(
+            help="Start date (UTC, YYYY-MM-DD) for a full download; "
+            "not needed with --update when a dataset already exists."
+        ),
+    ] = None,
     until: Annotated[
         str | None,
         typer.Option(help="End date (UTC, YYYY-MM-DD, exclusive). Defaults to today."),
@@ -73,6 +77,12 @@ def download(
         typer.echo(f"Updating {symbol} {timeframe} incrementally ...")
         df = downloader.update(symbol, timeframe, storage)
     else:
+        if since is None:
+            typer.echo(
+                "--since is required for a full download "
+                "(or pass --update with an existing dataset)."
+            )
+            raise typer.Exit(code=1)
         if update:
             typer.echo(f"No existing dataset at {path}; running a full download.")
         df = downloader.download(symbol, timeframe, since=since, until=until)

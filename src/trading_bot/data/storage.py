@@ -26,8 +26,18 @@ _MAX_GAP_MESSAGES = 10
 
 
 def symbol_to_slug(symbol: str) -> str:
-    """Convert a ccxt symbol to a filesystem-safe slug (``BTC/USDT`` -> ``BTC_USDT``)."""
-    return symbol.replace("/", "_")
+    """Convert a ccxt symbol to a filesystem-safe slug (``BTC/USDT`` -> ``BTC_USDT``).
+
+    Raises:
+        ValueError: if the symbol is empty or contains empty / ``..``
+            components — such slugs could escape the storage directory.
+    """
+    parts = symbol.split("/")
+    if any(part in ("", "..") for part in parts):
+        raise ValueError(
+            f"invalid symbol {symbol!r}: empty or '..' components are not allowed"
+        )
+    return "_".join(parts)
 
 
 def normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:

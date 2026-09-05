@@ -125,3 +125,18 @@ class TestBacktestConfig:
     def test_negative_min_notional_raises(self) -> None:
         with pytest.raises(ValidationError):
             BacktestConfig(start="2024-01-01", min_notional=-1.0)
+
+    def test_valid_timeframes_pass(self) -> None:
+        for timeframe in ("15m", "1h", "4h", "12h", "1d"):
+            assert BacktestConfig(start="2024-01-01", timeframe=timeframe).timeframe == (
+                timeframe
+            )
+
+    def test_bad_timeframe_format_raises(self) -> None:
+        for timeframe in ("4H", "hour", "m15", "1w", "1y", "4", "m", ""):
+            with pytest.raises(ValidationError, match="timeframe"):
+                BacktestConfig(start="2024-01-01", timeframe=timeframe)
+
+    def test_timeframe_above_one_day_raises(self) -> None:
+        with pytest.raises(ValidationError, match="must not exceed 1d"):
+            BacktestConfig(start="2024-01-01", timeframe="2d")

@@ -6,7 +6,7 @@ import ccxt
 import pandas as pd
 import pytest
 
-from tests.conftest import BASE_MS, make_candles, rows_to_df
+from tests.conftest import BASE_MS, HOUR_MS, make_candles, rows_to_df
 from trading_bot.data.downloader import MAX_ATTEMPTS, HistoryDownloader
 from trading_bot.data.storage import CandleStorage, validate_ohlcv
 
@@ -173,3 +173,77 @@ class TestUpdate:
 
         with pytest.raises(FileNotFoundError, match="full download"):
             downloader.update("BTC/USDT", "1h", storage)
+
+    def test_open_tail_is_dropped_before_saving(self, tmp_path, mocker) -> None:
+        # now is inside the bucket of the candle at BASE + 50h: it and every
+        # later candle are still open and must not reach the dataset.
+        mocker.patch(
+            "trading_bot.data.downloader._now_ms",
+            return_value=BASE_MS + 50 * HOUR_MS + HOUR_MS // 2,
+        )
+        storage = CandleStorage(tmp_path)
+        stored_df = rows_to_df(make_candles(50))
+        storage.save("bybit", "BTC/USDT", "1h", stored_df)
+        exchange = FakeExchange(make_candles(80))
+        downloader = HistoryDownloader(exchange)
+
+        df = downloader.update("BTC/USDT", "1h", storage)
+
+        # No *closed* candles beyond the stored 50: the dataset is unchanged.
+        assert len(df) == 50
+        pd.testing.assert_frame_equal(
+            storage.load("bybit", "BTC/USDT", "1h"), stored_df
+        )
+
+    def test_validation_problems_after_update_raise(self, tmp_path) -> None:
+        storage = CandleStorage(tmp_path)
+        storage.save("bybit", "BTC/USDT", "1h", rows_to_df(make_candles(10)))
+        # The tail introduces a gap: candles 10-11 are missing, 12+ arrive.
+        gappy = make_candles(20)[12:]
+        downloader = HistoryDownloader(FakeExchange(gappy))
+
+        with pytest.raises(ValueError, match=r"(?s)after update.*gap from"):
+            downloader.update("BTC/USDT", "1h", storage)
+
+
+class TestOpenCandleFilter:
+    def test_download_drops_candle_whose_bucket_is_still_open(self, mocker) -> None:
+        # now is inside the bucket of the last candle (BASE + 4h): it closes
+        # at BASE + 5h and must not be returned (and thus not saved).
+        mocker.patch(
+            "trading_bot.data.downloader._now_ms",
+            return_value=BASE_MS + 4 * HOUR_MS + HOUR_MS // 2,
+        )
+        exchange = FakeExchange(make_candles(5))
+        downloader = HistoryDownloader(exchange)
+
+        df = downloader.download("BTC/USDT", "1h", since="2025-08-01")
+
+        assert len(df) == 4
+        last_ms = int(df["timestamp"].iloc[-1].value // 1_000_000)
+        assert last_ms == BASE_MS + 3 * HOUR_MS
+
+    def test_download_closed_history_is_untouched(self, mocker) -> None:
+        # now is far beyond the last candle: nothing is dropped.
+        mocker.patch(
+            "trading_bot.data.downloader._now_ms",
+            return_value=BASE_MS + 100 * HOUR_MS,
+        )
+        exchange = FakeExchange(make_candles(5))
+        downloader = HistoryDownloader(exchange)
+
+        df = downloader.download("BTC/USDT", "1h", since="2025-08-01")
+
+        assert len(df) == 5
+
+    def test_download_with_only_open_candles_raises(self, mocker) -> None:
+        # The single available candle is still open: nothing closed to store.
+        mocker.patch(
+            "trading_bot.data.downloader._now_ms",
+            return_value=BASE_MS + HOUR_MS // 2,
+        )
+        exchange = FakeExchange(make_candles(1))
+        downloader = HistoryDownloader(exchange)
+
+        with pytest.raises(ValueError, match="still open"):
+            downloader.download("BTC/USDT", "1h", since="2025-08-01")
