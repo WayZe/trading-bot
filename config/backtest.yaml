@@ -29,7 +29,9 @@ slippage_bps: 5.0
 # Стратегия (плагин) и её параметры:
 #   fast/slow — периоды быстрой и медленной SMA (вход/выход по кроссу);
 #   atr_period — период ATR для стопа;
-#   atr_mult — множитель ATR: стоп = цена - atr_mult * ATR.
+#   atr_mult — множитель ATR: дистанция стопа от close сигнальной свечи
+#     (close - atr_mult * ATR); движок переносит её на фактическую цену
+#     исполнения и проверяет интрабарно.
 strategy: sma_cross
 strategy_params:
   fast: 20
