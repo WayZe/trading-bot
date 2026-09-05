@@ -1,17 +1,22 @@
 # trading-bot
 
-Учебный крипто-торговый бот: биржа Bybit (спот), свинг-стратегии на свечах,
-backtest-first подход. Цель проекта — научиться алготрейдингу: от сбора данных
-и бэктеста до (в перспективе) paper-трейдинга и live-торговли малой суммой.
+Учебный крипто-торговый бот: биржа **Bybit** (спот), свинг-стратегии на свечах,
+подход **backtest-first** — сначала проверяем идеи на истории, только потом
+(в перспективе) paper- и live-торговля. MVP проекта — офлайн-бэктестер с
+честной моделью исполнения.
 
-## Статус
+> Это образовательный проект. Ничего здесь — не финансовый совет;
+> торговля криптой рискованна, можете потерять деньги.
+
+## Статус и роадмап
 
 - [x] Этап 0 — каркас проекта, спецификация, зависимости
 - [x] Этап 1 — слой данных (загрузка OHLCV с Bybit, Parquet-хранилище, CLI `download`)
-- [ ] Этап 2 — индикаторы (SMA, EMA, RSI, ATR)
-- [ ] Этап 3 — бэктест-движок (engine, broker, portfolio, risk)
-- [ ] Этап 4 — отчёты (метрики, графики)
-- [ ] Этап 5+ — стратегии, paper/live
+- [x] Этап 2 — индикаторы (SMA, EMA, RSI, ATR) и стратегия `sma_cross`
+- [x] Этап 3 — бэктест-движок (event loop, broker, portfolio, risk) и CLI `backtest`
+- [x] Этап 4 — отчёты: метрики прогона, графики эквити/просадки и сделок, CLI `report`
+- [ ] Этап 5 — paper-трейдинг на Bybit testnet
+- [ ] Этап 6 — live-торговля малой суммой (с жёсткими ограничениями риска)
 
 Дизайн проекта: [docs/superpowers/specs/2026-09-05-trading-bot-design.md](docs/superpowers/specs/2026-09-05-trading-bot-design.md)
 
@@ -23,19 +28,140 @@ backtest-first подход. Цель проекта — научиться ал
 uv sync
 ```
 
-Скачать исторические свечи с Bybit (публичный API, ключи не нужны):
+Дальше три команды: скачать историю → прогнать бэктест → посмотреть отчёт.
+
+**1. Скачать свечи с Bybit** (публичный API, ключи не нужны):
 
 ```bash
-uv run trading-bot download --symbol BTC/USDT --timeframe 4h --since 2025-08-01
+uv run trading-bot download --symbol BTC/USDT --timeframe 4h --since 2025-01-01
 ```
 
+Данные ложатся в Parquet: `data/bybit/BTC_USDT/4h.parquet`.
 Инкрементальное обновление существующего датасета:
 
 ```bash
-uv run trading-bot download --symbol BTC/USDT --timeframe 4h --since 2025-08-01 --update
+uv run trading-bot download --symbol BTC/USDT --timeframe 4h --since 2025-01-01 --update
 ```
 
-Данные складываются в Parquet: `data/bybit/BTC_USDT/4h.parquet`.
+**2. Прогнать бэктест** (конфиг — `config/backtest.yaml`):
+
+```bash
+uv run trading-bot backtest --config config/backtest.yaml
+```
+
+Артефакты прогона (кривая эквити, сделки, meta) пишутся в `reports/last_run/`.
+
+**3. Посмотреть отчёт** — таблица метрик + графики:
+
+```bash
+uv run trading-bot report
+```
+
+Команда читает артефакты из `reports/last_run/`, печатает метрики (доходность,
+CAGR, Шарп, просадка, winrate, profit factor, комиссии, ...) и сохраняет
+`reports/last_run/equity.png` (эквити + просадка) и `reports/last_run/trades.png`
+(сделки на графике цены). Свечи для графика сделок ищутся автоматически в
+`data/`; можно указать файл явно:
+
+```bash
+uv run trading-bot report --run-dir reports/last_run --candles data/bybit/BTC_USDT/4h.parquet
+```
+
+## Архитектура
+
+Слои изолированы, зависимости направлены сверху вниз (CLI → engine → data):
+
+```
+src/trading_bot/
+  cli.py           CLI (typer): download, backtest, report
+  config.py        pydantic-модель конфига бэктеста (config/backtest.yaml)
+  indicators.py    векторные индикаторы: sma, ema, rsi, atr
+  risk.py          размер позиции (доля equity, min_notional, округление)
+  data/            слой данных: exchange (ccxt/bybit), downloader (пагинация,
+                   ретраи, заполнение гэпов), storage (Parquet)
+  engine/          бэктест: broker (комиссия+проскальзывание), portfolio
+                   (кэш, позиция, TradeRecord), backtest (event loop)
+  strategy/        плагины стратегий: base (Signal/Fill/Strategy ABC),
+                   sma_cross, реестр по имени
+  report/          метрики прогона (metrics.py) и графики (plots.py)
+```
+
+Стратегия не знает, кто её вызывает — бэктест-движок или будущий live-движок;
+исполнение полностью принадлежит engine и его broker. Подробности — в
+[спецификации](docs/superpowers/specs/2026-09-05-trading-bot-design.md).
+
+## Как добавить свою стратегию
+
+Стратегия — класс от `Strategy`: метод `on_candle` получает все свечи
+до закрытой включительно и возвращает список `Signal` (намерения, не исполнение).
+Пример — моментум за 10 свечей:
+
+```python
+# src/trading_bot/strategy/momentum.py
+from trading_bot.strategy.base import Signal, SignalKind, Strategy
+
+
+class MomentumStrategy(Strategy):
+    name = "momentum"
+
+    def __init__(self, lookback: int = 10, threshold: float = 0.02) -> None:
+        self.lookback = lookback
+        self.threshold = threshold
+
+    @property
+    def warmup_period(self) -> int:
+        return self.lookback
+
+    def on_candle(self, candles) -> list[Signal]:
+        close = candles["close"]
+        change = close.iloc[-1] / close.iloc[-self.lookback] - 1.0
+        if change > self.threshold:
+            return [Signal(SignalKind.LONG_ENTRY, reason=f"рост {change:.1%} за {self.lookback} свечей")]
+        if change < -self.threshold:
+            return [Signal(SignalKind.LONG_EXIT, reason=f"падение {change:.1%}")]
+        return []
+```
+
+Зарегистрируйте класс в реестре:
+
+```python
+# src/trading_bot/strategy/__init__.py
+from trading_bot.strategy.momentum import MomentumStrategy
+
+STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
+    "sma_cross": SmaCrossStrategy,
+    "momentum": MomentumStrategy,  # новая стратегия
+}
+```
+
+И включите её в конфиг:
+
+```yaml
+# config/backtest.yaml
+strategy: momentum
+strategy_params:
+  lookback: 10
+  threshold: 0.02
+```
+
+Параметры из `strategy_params` передаются в конструктор как есть. Опционально
+можно переопределить `on_fill` (фактические исполнения) и `reset`
+(сброс состояния между прогонами).
+
+## Честность бэктеста
+
+Чтобы результатам можно было верить, движок моделирует исполнение консервативно:
+
+- **Нет заглядывания в будущее**: сигнал считается по close свечи `i`,
+  исполняется по open свечи `i+1`.
+- **Комиссия** — taker за каждую сторону (`fee_rate`, по умолчанию 0.1%).
+- **Проскальзывание** — в базисных пунктах против нас: покупка выше, продажа
+  ниже (`slippage_bps`).
+- **Стопы** проверяются внутри свечи; гэп через уровень исполняется по open
+  (худшая цена), при одновременном касании стопа и тейка приоритет у стопа.
+- **Одна long-позиция**, размер ограничен долей equity (`position_size_pct`)
+  и `min_notional` биржи; equity переоценивается по close каждой свечи.
+- Ордер, оставшийся неисполненным на последней свече, не считается сделкой.
 
 ## Разработка
 
@@ -44,16 +170,19 @@ uv run pytest          # тесты (офлайн, сеть не нужна)
 uv run ruff check .    # линтер
 ```
 
-## Структура
+## Структура репозитория
 
 ```
-config/            примеры конфигов (backtest.yaml)
+config/            конфиги (backtest.yaml)
 data/              скачанные свечи (gitignored)
-reports/           отчёты бэктестов (gitignored)
+reports/           артефакты прогонов и графики (gitignored)
 docs/              дизайн-документы
-src/trading_bot/
-  cli.py           CLI (typer)
-  config.py        pydantic-модели конфигурации
-  data/            слой данных: exchange, downloader, storage
-tests/
+src/trading_bot/   исходный код (см. «Архитектура»)
+tests/             тесты, зеркалят структуру src
 ```
+
+## Дисклеймер
+
+Проект создан для изучения алготрейдинга. Это не финансовый совет,
+не инвестиционная рекомендация и не готовый торговый инструмент.
+Авторы не несут ответственности за возможные убытки при использовании кода.
