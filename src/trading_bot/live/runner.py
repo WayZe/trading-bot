@@ -212,7 +212,8 @@ class LiveRunner:
     def _close_position(self, reason: str) -> None:
         """Продать позицию целиком, сбросить стопы и сохранить состояние."""
         position = self.state.position
-        assert position is not None  # вызывается только при открытой позиции
+        if position is None:
+            return
         fill = self._place_order("sell", position.quantity, reason)
         if fill is None:
             return
