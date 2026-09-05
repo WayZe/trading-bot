@@ -271,8 +271,10 @@ class TestExit:
 
     def test_exit_channel_excludes_current_candle(self) -> None:
         # Свеча с длинным нижним wick (low 99.5), но close 102 — выше канала
-        # выхода (100): выхода нет. Реализация, включающая текущую свечу в
-        # канал, получила бы min = 99.5 < close и вышла бы ошибочно.
+        # выхода (100): выхода нет. Прямое доказательство сдвига канала даёт
+        # test_breakdown_below_previous_low_emits_exit: без сдвига канал
+        # включал бы собственный low свечи, и close никогда не опустился бы
+        # ниже такого канала.
         strategy, candles, _ = self.make_strategy_in_position()
         tail = candles_from_hlc([(103.0, 101.0, 102.0), (102.0, 99.5, 102.0)])
 
