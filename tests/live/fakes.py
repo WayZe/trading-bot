@@ -106,10 +106,12 @@ class PrivateCcxt(FakeCcxt):
         ticker_price=100.0,
         order_status: dict | None = None,
         free_usdt: float = 0.0,
+        fetch_order_exc: Exception | None = None,
     ) -> None:
         super().__init__(rows, ticker_price)
         self.order_status = order_status or {}
         self.free_usdt = free_usdt
+        self.fetch_order_exc = fetch_order_exc
         self.created_orders: list[tuple] = []
 
     def create_order(self, symbol, order_type, side, quantity, *args, **kwargs) -> dict:
@@ -117,6 +119,8 @@ class PrivateCcxt(FakeCcxt):
         return {"id": f"ord-{len(self.created_orders)}"}
 
     def fetch_order(self, order_id, symbol) -> dict:
+        if self.fetch_order_exc is not None:
+            raise self.fetch_order_exc
         return {"id": order_id, "status": "closed", **self.order_status}
 
     def fetch_balance(self) -> dict:

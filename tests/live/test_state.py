@@ -119,9 +119,43 @@ class TestApplyFill:
         state.apply_fill(_fill("sell", price=110.0, quantity=2.0, fee=0.22))
 
         assert state.position is None
+        assert state.needs_attention is False
+        assert state.attention_reason is None
         # 1000 - (200 + 0.2) + (220 - 0.22) = 1019.58
         assert state.equity == pytest.approx(1_019.58)
         assert len(state.trades) == 2
+
+    def test_partial_sell_keeps_position_and_raises_attention(self) -> None:
+        state = LiveState(equity=1_000.0)
+        state.apply_fill(_fill("buy", price=100.0, quantity=2.0, fee=0.2))
+        state.set_stops(95.0, 120.0)
+
+        state.apply_fill(_fill("sell", price=110.0, quantity=1.2, fee=0.15))
+
+        # Остаток позиции не закрыт: продано меньше, чем открыто.
+        assert state.position is not None
+        assert state.position.quantity == pytest.approx(0.8)
+        assert state.position.entry_price == pytest.approx(100.0)
+        # Торговля встаёт до ручного разбора, стопы при остатке сохраняются.
+        assert state.needs_attention is True
+        assert state.attention_reason is not None
+        assert "partial sell" in state.attention_reason
+        assert (state.active_stop, state.active_tp) == (95.0, 120.0)
+        # Выручка за проданную часть зачислена.
+        assert state.equity == pytest.approx(1_000.0 - 200.0 - 0.2 + 132.0 - 0.15)
+        assert [t["side"] for t in state.trades] == ["buy", "sell"]
+
+    def test_sell_more_than_position_closes_entirely(self) -> None:
+        state = LiveState(equity=1_000.0)
+        state.apply_fill(_fill("buy", price=100.0, quantity=2.0, fee=0.2))
+        state.set_stops(95.0, 120.0)
+
+        state.apply_fill(_fill("sell", price=110.0, quantity=2.5, fee=0.3))
+
+        # Продано не меньше объёма позиции -> позиция закрыта (сброс стопов —
+        # обязанность раннера после полного закрытия).
+        assert state.position is None
+        assert state.needs_attention is False
 
     def test_pyramiding_is_rejected(self) -> None:
         state = LiveState()
@@ -153,6 +187,18 @@ class TestTransitions:
         state.set_last_candle(TS)
         assert state.last_candle_timestamp() == TS
         assert state.last_candle_ts == TS.isoformat()
+
+    def test_mark_needs_attention_stores_reason(self, tmp_path) -> None:
+        state = LiveState()
+        assert state.needs_attention is False
+        assert state.attention_reason is None
+
+        state.mark_needs_attention("order status unknown")
+        state.save(tmp_path / "state.json")
+        loaded = LiveState.load(tmp_path / "state.json")
+
+        assert loaded.needs_attention is True
+        assert loaded.attention_reason == "order status unknown"
 
 
 class TestConfigConsistency:

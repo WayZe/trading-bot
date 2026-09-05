@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import ccxt
 import pytest
 
 from tests.live.fakes import FakeCcxt, PrivateCcxt
 from trading_bot.data.exchange import ExchangeClient
 from trading_bot.engine.broker import SimulatedBroker
-from trading_bot.live.execution import PaperAdapter
+from trading_bot.live.execution import OrderStateUncertain, PaperAdapter
 from trading_bot.live.execution import TestnetAdapter as _TestnetAdapter
 
 
@@ -86,6 +87,55 @@ class TestTestnetAdapter:
         assert fill.price == 120.0
         assert fill.quantity == 1.0
         assert fill.fee == 0.0
+
+    def test_network_error_on_create_raises_uncertain(self) -> None:
+        adapter, fake = self._adapter(order_status={})
+
+        def timeout(*args, **kwargs):
+            raise ccxt.NetworkError("request timeout")
+
+        fake.create_order = timeout
+
+        with pytest.raises(OrderStateUncertain, match="unconfirmed"):
+            adapter.execute("buy", 1.0, "donchian breakout up")
+
+        # Запрос ушёл: факт создания ордера неясен — повтор вслепую запрещён.
+        assert len(fake.created_orders) == 0
+
+    def test_any_error_after_create_raises_uncertain(self) -> None:
+        adapter, fake = self._adapter(order_status={})
+        fake.fetch_order_exc = ccxt.NetworkError("connection reset")
+
+        with pytest.raises(OrderStateUncertain, match="execution status is unknown"):
+            adapter.execute("buy", 1.0, "donchian breakout up")
+
+        # Ордер создан (create вернул ответ), но результат неизвестен.
+        assert len(fake.created_orders) == 1
+
+    def test_unparseable_status_raises_uncertain(self) -> None:
+        # Ни average, ни price: ордер создан, цену исполнения распарсить нельзя.
+        adapter, fake = self._adapter(order_status={"status": "closed"})
+
+        with pytest.raises(OrderStateUncertain, match="execution status is unknown"):
+            adapter.execute("sell", 1.0, "stop loss")
+
+        assert len(fake.created_orders) == 1
+
+    def test_exchange_rejection_propagates_as_is(self) -> None:
+        # Отклонение до отправки (сервер ответил ошибкой) — ордер гарантированно
+        # не создан: исключение остаётся обычным ExchangeError, не оборачивается
+        # в OrderStateUncertain (обрабатывается в раннере консервативно).
+        adapter, fake = self._adapter(order_status={})
+
+        def reject(*args, **kwargs):
+            raise ccxt.InvalidOrder("amount below minimum")
+
+        fake.create_order = reject
+
+        with pytest.raises(ccxt.ExchangeError) as exc_info:
+            adapter.execute("buy", 1.0, "donchian breakout up")
+
+        assert not isinstance(exc_info.value, OrderStateUncertain)
 
     def test_fetch_equity_returns_free_usdt(self) -> None:
         adapter, _ = self._adapter(order_status={}, free_usdt=7_777.5)

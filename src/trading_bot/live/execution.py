@@ -11,6 +11,9 @@
 - :class:`TestnetAdapter` — реальные рыночные ордера на bybit testnet через
   ccxt: после размещения ордера запрашивается его фактический статус, и в
   результат идут средняя цена исполнения, исполненный объём и комиссия.
+  Сбой после отправки ордера (сеть упала, статус не получен) возводит
+  :class:`OrderStateUncertain` — раннер отвечает флагом ``needs_attention``
+  и остановкой торговли, чтобы не задвоить ордер на том же сигнале.
 """
 
 from __future__ import annotations
@@ -20,12 +23,24 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 
+import ccxt
 import pandas as pd
 
 from trading_bot.data.exchange import ExchangeClient
 from trading_bot.engine.broker import SimulatedBroker
 
 logger = logging.getLogger(__name__)
+
+
+class OrderStateUncertain(RuntimeError):
+    """Неясно, был ли размещён ордер и как он исполнился.
+
+    Возводится testnet-адаптером, когда сбой произошёл **после** отправки
+    рыночного ордера (NetworkError на создание, падение или нераспарсенный
+    статус в ``fetch_order``): позиция на бирже могла открыться, но раннер
+    не знает цену/объём. Повторять ордер вслепую нельзя — риск дубля;
+    корректная реакция (в раннере) — флаг ``needs_attention`` и стоп торговли.
+    """
 
 
 @dataclass(frozen=True)
@@ -140,6 +155,17 @@ class TestnetAdapter(ExecutionAdapter):
     После размещения ордера запрашивается его статус: в результат идут
     фактическая средняя цена исполнения, исполненный объём и комиссия —
     симуляция здесь заканчивается.
+
+    Ошибки разделены по моменту возникновения (гарантия против дубля ордера):
+
+    - **до отправки** (валидация ccxt на клиенте, отклонение биржей с
+      явным ответом — ``ccxt.ExchangeError``): ордер гарантированно не
+      создан, исключение уходит в раннер как есть;
+    - **после отправки / неизвестно** (``NetworkError`` на создание, любая
+      ошибка после успешного создания — упал ``fetch_order``, статус не
+      распарсился): ордер, возможно, уже на бирже — адаптер возводит
+      :class:`OrderStateUncertain`, и раннер обязан остановить торговлю
+      флагом ``needs_attention`` вместо повтора ордера.
     """
 
     def __init__(self, exchange: ExchangeClient, symbol: str) -> None:
@@ -164,13 +190,30 @@ class TestnetAdapter(ExecutionAdapter):
             stop_distance,
             tp_distance,
         )
-        order = self.exchange.create_market_order(self.symbol, side, quantity)
-        order_id = order["id"]
-        status = self.exchange.fetch_order(order_id, self.symbol)
-        price = float(status.get("average") or status.get("price"))
-        filled = float(status.get("filled") or quantity)
-        fee_data = status.get("fee") or {}
-        fee = float(fee_data.get("cost") or 0.0)
+        try:
+            order = self.exchange.create_market_order(self.symbol, side, quantity)
+        except ccxt.NetworkError as error:
+            # Запрос мог дойти до биржи: создание ордера не подтверждено и
+            # не опровергнуто — повтор вслепую рискует задвоить позицию.
+            raise OrderStateUncertain(
+                f"market {side} order of {quantity} {self.symbol} was sent but its "
+                f"creation is unconfirmed (network error: {error})"
+            ) from error
+        # Ордер создан (create вернул ответ): дальше любой сбой оставляет
+        # ордер на бирже с неизвестным результатом исполнения.
+        try:
+            order_id = order["id"]
+            status = self.exchange.fetch_order(order_id, self.symbol)
+            price = float(status.get("average") or status.get("price"))
+            filled = float(status.get("filled") or quantity)
+            fee_data = status.get("fee") or {}
+            fee = float(fee_data.get("cost") or 0.0)
+        except Exception as error:
+            raise OrderStateUncertain(
+                f"market {side} order of {quantity} {self.symbol} was created "
+                f"(id={order.get('id')!r}) but its execution status is unknown: "
+                f"{error!r}"
+            ) from error
         return FillResult(
             side=side,
             quantity=filled,

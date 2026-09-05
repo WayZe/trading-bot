@@ -5,20 +5,35 @@
 1. Тикер: если позиция открыта и цена пробила активный стоп/тейк —
    немедленный market-sell (гэп через уровень исполняется по фактической
    цене — хуже стопа, как консервативно и в бэктест-движке).
+   Ограничение: уровни проверяются только по тикеру, раз в ``poll_seconds`` —
+   «фитиль с восстановлением» внутри закрытой свечи live-раннер не видит
+   (бэктест-движок видит свечу целиком); для 4h-свечей рекомендуется
+   ``poll_seconds`` не больше 60.
 2. Свечи: догрузка закрытых свечей с биржи (пагинация, ретраи, отбрасывание
    открытых — всё это делает :class:`HistoryDownloader`), новая закрытая
    свеча идёт в Parquet-хранилище и в стратегию; сигналы исполняются
    адаптером (paper — симуляция по тикеру, testnet — реальные ордера).
    Уровни стоп/тейк входа переякориваются на фактическую цену исполнения
-   теми же функциями, что и в бэктест-движке (``engine.stops``).
-3. Heartbeat и персистентность: состояние сохраняется после каждой
-   обработанной свечи и каждого исполнения — рестарт посреди батча не
-   теряет историю.
+   теми же функциями, что и в бэктест-движке (``engine.stops``); сайзинг
+   входа считается по цене тикера, а не по close сигнальной свечи.
+   Догон после простоя: если накопилось несколько закрытых свечей, сигнал
+   исполняется только для последней — устаревшие сигналы промежуточных
+   свечей по текущей цене не торгуются (стратегия их получает как прогрев).
+3. Heartbeat и персистентность: состояние сохраняется сразу после каждого
+   исполнения и после каждой обработанной свечи — крэш посреди цикла не
+   теряет ни позицию, ни историю.
 
-Защитные механизмы: kill-switch (файл существует → любые новые ордера
-запрещены), флаг ``needs_attention`` (после непонятного состояния ордера
-в testnet торговля стоит до ручного разбора), сетевые ошибки не убивают
-цикл, а логируются и пропускаются.
+Гарантия от дубля ордера (testnet): любая ошибка исполнения, оставляющая
+неясным факт или результат размещения ордера (NetworkError на создание,
+сбой после успешного создания — упал fetch_order, статус не распарсился),
+поднимает ``needs_attention`` и останавливает торговлю до ручного разбора;
+сигнал при этом считается потреблённым — свеча помечается обработанной и
+повторного ордера по тому же сигналу не будет.
+
+Защитные механизмы: kill-switch (``kill_switch_path``) — запрещены ВСЕ
+новые ордера, пока существует файл-свитч; флаг ``needs_attention``
+(после непонятного состояния ордера в testnet торговля стоит до ручного
+разбора); сетевые ошибки не убивают цикл, а логируются и пропускаются.
 
 Первая догрузка истории (чистый state) — только прогрев: исторические
 сигналы устарели, торговать по ним по текущей цене нельзя; торговля
@@ -44,7 +59,7 @@ from trading_bot.engine.stops import (
     reanchor_stop_below,
     reanchor_take_profit_above,
 )
-from trading_bot.live.execution import ExecutionAdapter, FillResult
+from trading_bot.live.execution import ExecutionAdapter, FillResult, OrderStateUncertain
 from trading_bot.live.state import LiveState
 from trading_bot.risk import RiskManager
 from trading_bot.strategy.base import Fill, Signal, SignalKind, Strategy
@@ -152,7 +167,11 @@ class LiveRunner:
                     exchange_qty,
                     base_currency,
                 )
-                self.state.mark_needs_attention()
+                self.state.mark_needs_attention(
+                    f"exchange holds {exchange_qty:.6f} {base_currency} without "
+                    "a state position: entry price and stops are unknown, "
+                    "inspect the exchange manually"
+                )
         elif exchange_qty <= 0:
             logger.warning(
                 "reconcile: position is missing on the exchange; "
@@ -182,7 +201,7 @@ class LiveRunner:
         ticker_price = self.exchange_client.fetch_ticker_last(self.config.symbol)
         self._protect_position(ticker_price)
         candles = self._sync_candles()
-        self._process_new_candles(candles)
+        self._process_new_candles(candles, ticker_price)
         self._heartbeat(ticker_price)
 
     def _protect_position(self, ticker_price: float) -> None:
@@ -218,9 +237,22 @@ class LiveRunner:
         if fill is None:
             return
         self.state.apply_fill(fill)
-        self.state.clear_stops()
-        self.strategy.on_fill(self._as_strategy_fill(fill))
+        if self.state.position is None:
+            self.state.clear_stops()
+        else:
+            # Частичное исполнение (продано меньше, чем просили): apply_fill
+            # уже уменьшил позицию и поднял needs_attention — стопы остаются.
+            logger.error(
+                "partial %s fill: %.6f of %.6f sold @ %.4f, %.6f remains; "
+                "trading is paused for manual review",
+                reason,
+                fill.quantity,
+                position.quantity,
+                fill.price,
+                self.state.position.quantity,
+            )
         self.state.save(self.config.state_path)
+        self.strategy.on_fill(self._as_strategy_fill(fill))
         logger.info(
             "exit filled (%s): %.6f @ %.4f (fee %.4f)", reason, fill.quantity, fill.price, fill.fee
         )
@@ -247,13 +279,17 @@ class LiveRunner:
         self.storage.save(EXCHANGE_ID, self.config.symbol, self.config.timeframe, candles)
         return candles
 
-    def _process_new_candles(self, candles: pd.DataFrame) -> None:
+    def _process_new_candles(self, candles: pd.DataFrame, ticker_price: float) -> None:
         """Провести новые закрытые свечи через стратегию и исполнить сигналы.
 
         Чистый state: вся догруженная история — только прогрев (исторические
-        сигналы устарели и по текущей цене не исполняются). Рестарт:
+        сигналы устарели и по текущей цене не исполняются). Рестарт/простой:
         каждая новая закрытая свеча обрабатывается по очереди, состояние
         сохраняется после каждой — сбой посреди батча не теряет историю.
+        Если накопилось несколько свечей, торговый сигнал исполняется только
+        для последней: сигналы промежуточных свечей к текущему моменту
+        устарели, они остаются стратегией как прогрев (warning с числом
+        прогретых свечей). Батч из одной свечи торгуется как раньше.
         """
         last_ts = self.state.last_candle_timestamp()
         if last_ts is None:
@@ -271,29 +307,50 @@ class LiveRunner:
         if candles.empty:
             return
         new_candles = candles[candles["timestamp"] > last_ts]
-        for row in new_candles.itertuples(index=False):
+        if len(new_candles) > 1:
+            logger.warning(
+                "catch-up after downtime: %d new candle(s) accumulated; executing "
+                "signals only for the latest, %d stale candle(s) are strategy "
+                "warmup without order execution",
+                len(new_candles),
+                len(new_candles) - 1,
+            )
+        for index, row in enumerate(new_candles.itertuples(index=False)):
             candle_ts = pd.Timestamp(row.timestamp)
             ref_close = float(row.close)
             history = candles[candles["timestamp"] <= candle_ts]
-            for signal in self.strategy.on_candle(history):
-                self._handle_signal(signal, ref_close)
+            signals = self.strategy.on_candle(history)
+            if index == len(new_candles) - 1:
+                # Только последняя свеча батча торгуема (или батч из одной).
+                for signal in signals:
+                    self._handle_signal(signal, ref_close, ticker_price)
             self.state.set_last_candle(candle_ts)
             self.state.save(self.config.state_path)
 
-    def _handle_signal(self, signal: Signal, ref_close: float) -> None:
-        """Исполнить один сигнал стратегии на текущем рынке."""
+    def _handle_signal(
+        self, signal: Signal, ref_close: float, ticker_price: float
+    ) -> None:
+        """Исполнить один сигнал стратегии на текущем рынке.
+
+        Сайзинг входа считается по цене тикера: фактическое исполнение ближе
+        к текущей рыночной цене, чем к close сигнальной свечи. Дистанции
+        стоп/тейк, напротив, заданы стратегией от close сигнальной свечи и
+        переносятся на цену исполнения общими функциями ``engine.stops``.
+        Позиция и стопы сохраняются в state сразу после исполнения входа:
+        крэш до конца цикла не должен «потерять» открытую позицию.
+        """
         if signal.kind is SignalKind.LONG_ENTRY:
             if self.state.position is not None:
                 logger.debug("LONG_ENTRY ignored: position already open")
                 return
             equity = self.adapter.fetch_equity()
-            quantity = self.risk.position_quantity(equity, ref_close)
+            quantity = self.risk.position_quantity(equity, ticker_price)
             if quantity <= 0.0:
                 logger.warning(
                     "LONG_ENTRY skipped: quantity below min_notional "
-                    "(equity %.2f, close %.2f)",
+                    "(equity %.2f, ticker %.2f)",
                     equity,
-                    ref_close,
+                    ticker_price,
                 )
                 return
             stop_distance = (
@@ -314,6 +371,7 @@ class LiveRunner:
                 reanchor_stop_below(signal.stop_loss, ref_close, fill.price),
                 reanchor_take_profit_above(signal.take_profit, ref_close, fill.price),
             )
+            self.state.save(self.config.state_path)
             self.strategy.on_fill(self._as_strategy_fill(fill))
             logger.info(
                 "entry filled (%s): %.6f @ %.4f, stop=%s tp=%s",
@@ -331,7 +389,21 @@ class LiveRunner:
             if fill is None:
                 return
             self.state.apply_fill(fill)
-            self.state.clear_stops()
+            if self.state.position is None:
+                self.state.clear_stops()
+            else:
+                # Частичное исполнение: apply_fill поднял needs_attention,
+                # стопы при остатке позиции сохраняются.
+                logger.error(
+                    "partial %s fill: %.6f of %.6f sold @ %.4f, %.6f remains; "
+                    "trading is paused for manual review",
+                    signal.reason,
+                    fill.quantity,
+                    self.state.position.quantity + fill.quantity,
+                    fill.price,
+                    self.state.position.quantity,
+                )
+            self.state.save(self.config.state_path)
             self.strategy.on_fill(self._as_strategy_fill(fill))
             logger.info(
                 "exit filled (%s): %.6f @ %.4f (fee %.4f)",
@@ -351,12 +423,19 @@ class LiveRunner:
         stop_distance: float | None = None,
         tp_distance: float | None = None,
     ) -> FillResult | None:
-        """Единственная точка размещения ордеров: kill-switch, флаг внимания, ошибки.
+        """Единственная точка размещения ордеров: свитчи, флаг внимания, ошибки.
 
-        Ордер не размещается, пока активен kill-switch или выставлен
-        ``needs_attention`` (оба варианта — warning в лог). Ошибка биржи при
-        размещении (testnet) означает неясное состояние позиции: error-лог,
-        ``needs_attention``, persist — и продолжение без ордера.
+        Свитчи: kill-switch запрещает любые ордера; ``needs_attention``
+        блокирует всё до ручного сброса флага (все варианты — warning/error
+        в лог).
+
+        Гарантия от дубля ордера (B1): ошибка исполнения, оставляющая неясным
+        факт или результат размещения (``OrderStateUncertain`` от testnet-
+        адаптера, отклонение биржей), поднимает ``needs_attention`` с текстом
+        причины и возвращает ``None`` — исключение не уходит в общий цикл,
+        свеча помечается обработанной и повторного ордера по тому же сигналу
+        не будет. Ошибка, гарантированно оставляющая ордер несозданным
+        (валидация ccxt до отправки), повторится на следующем цикле безопасно.
         """
         if self.kill_switch_active():
             logger.warning(
@@ -376,23 +455,43 @@ class LiveRunner:
             return self.adapter.execute(
                 side, quantity, reason, stop_distance, tp_distance
             )
+        except OrderStateUncertain as error:
+            logger.error(
+                "order %s (%s) is in an unclear state: %s; marking needs_attention, "
+                "the signal is consumed and will NOT be retried (duplicate protection)",
+                side,
+                reason,
+                error,
+            )
+            self.state.mark_needs_attention(str(error))
+            self.state.save(self.config.state_path)
+            return None
         except ccxt.ExchangeError:
             logger.exception(
                 "order %s (%s) failed on the exchange: position state is unclear, "
-                "marking needs_attention",
+                "marking needs_attention; the signal is consumed and will NOT be "
+                "retried",
                 side,
                 reason,
             )
-            self.state.mark_needs_attention()
+            self.state.mark_needs_attention(
+                f"{side} order ({reason}) failed on the exchange: verify whether "
+                "it was placed and check open orders before resuming"
+            )
             self.state.save(self.config.state_path)
             return None
 
     def _heartbeat(self, ticker_price: float) -> None:
-        """Строка наблюдаемости в каждом цикле: режим, позиция, цена, возраст свечи."""
+        """Строка наблюдаемости в каждом цикле: режим, позиция, цена, свитчи."""
         if self.state.needs_attention:
             logger.error(
-                "NEEDS ATTENTION: trading is paused after an unclear order state; "
+                "NEEDS ATTENTION: trading is paused after an unclear order state%s; "
                 "resolve it and clear the flag in %s",
+                (
+                    f" ({self.state.attention_reason})"
+                    if self.state.attention_reason
+                    else ""
+                ),
                 self.config.state_path,
             )
         position = self.state.position

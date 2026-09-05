@@ -6,6 +6,7 @@ import logging
 import math
 from pathlib import Path
 
+import ccxt
 import pandas as pd
 import pytest
 
@@ -14,6 +15,7 @@ from tests.live.fakes import (
     DONCHIAN_TEST_PARAMS,
     FOUR_HOUR_MS,
     FailingOrderCcxt,
+    PrivateCcxt,
     append_candle,
     build_runner,
     donchian_rows,
@@ -351,6 +353,159 @@ class TestEngineParity:
         assert live_stop == pytest.approx(engine_entry_price - STOP_DISTANCE)
         assert live_entry_price == pytest.approx(engine_entry_price)
         assert live_exit_price == pytest.approx(engine_exit_price)
+
+
+class TestDuplicateOrderProtection:
+    """B1: сбой после отправки ордера не приводит к повторному ордеру.
+
+    NetworkError на create или падение fetch_order после успешного создания
+    оставляют факт исполнения неясным: раннер обязан поднять needs_attention
+    и НЕ переобрабатывать свечу — иначе следующий цикл поставил бы второй
+    ордер по тому же сигналу.
+    """
+
+    def _testnet_runner(self, tmp_path, fake):
+        cfg = make_config(tmp_path)
+        adapter = _TestnetAdapter(build_client(fake), cfg.symbol)
+        return build_runner(cfg, fake, adapter=adapter), cfg
+
+    def test_fetch_order_failure_marks_attention_without_second_order(
+        self, tmp_path, caplog
+    ) -> None:
+        fake = PrivateCcxt(
+            donchian_rows(FLAT),
+            ticker_price=BREAKOUT_CLOSE,
+            free_usdt=START_CASH,
+            fetch_order_exc=ccxt.NetworkError("connection reset"),
+        )
+        runner, cfg = self._testnet_runner(tmp_path, fake)
+        runner.run_once()  # чистый state: только прогрев
+
+        append_candle(fake, [*FLAT, BREAKOUT_CLOSE])
+        fake.ticker_price = BREAKOUT_CLOSE
+        with caplog.at_level(logging.ERROR, logger="trading_bot.live.runner"):
+            runner.run_once()
+
+        # Ордер ушёл на биржу один раз; статус получить не удалось.
+        assert len(fake.created_orders) == 1
+        state = LiveState.load(cfg.state_path)
+        assert state.needs_attention is True
+        assert state.attention_reason is not None
+        assert state.position is None
+        # Свеча помечена обработанной, несмотря на сбой: дубля не будет.
+        assert state.last_candle_ts == _last_candle_iso(len(FLAT) + 1)
+        assert "will NOT be retried" in caplog.text
+
+        # Сеть «починилась», но торговля стоит до ручного сброса флага.
+        fake.fetch_order_exc = None
+        append_candle(fake, [*FLAT, BREAKOUT_CLOSE, 125.0])
+        fake.ticker_price = 125.0
+        runner.run_once()
+
+        assert len(fake.created_orders) == 1
+        assert LiveState.load(cfg.state_path).position is None
+
+    def test_unparseable_status_marks_attention_without_second_order(
+        self, tmp_path
+    ) -> None:
+        # Статус без average/price: ордер создан, результат не распарсился.
+        fake = PrivateCcxt(
+            donchian_rows(FLAT),
+            ticker_price=BREAKOUT_CLOSE,
+            free_usdt=START_CASH,
+            order_status={"status": "closed"},
+        )
+        runner, cfg = self._testnet_runner(tmp_path, fake)
+        runner.run_once()
+
+        append_candle(fake, [*FLAT, BREAKOUT_CLOSE])
+        fake.ticker_price = BREAKOUT_CLOSE
+        runner.run_once()
+
+        assert len(fake.created_orders) == 1
+        state = LiveState.load(cfg.state_path)
+        assert state.needs_attention is True
+        assert state.position is None
+        assert state.last_candle_ts == _last_candle_iso(len(FLAT) + 1)
+
+
+class TestCatchUp:
+    """M2: догон после простоя исполняет сигнал только последней свечи батча."""
+
+    def _warm_runner(self, tmp_path):
+        runner, fake, cfg = make_runner(tmp_path, closes=FLAT, ticker_price=130.0)
+        runner.run_once()
+        return runner, fake, cfg
+
+    def test_batch_of_three_trades_only_the_latest_signal(self, tmp_path, caplog) -> None:
+        runner, fake, cfg = self._warm_runner(tmp_path)
+        # За время простоя накопились: пробой (вход), пробой канала вниз
+        # (выход), снова пробой вверх. Промежуточные сигналы устарели.
+        append_candle(fake, [*FLAT, 125.0])
+        append_candle(fake, [*FLAT, 125.0, 96.0])
+        append_candle(fake, [*FLAT, 125.0, 96.0, 130.0])
+        fake.ticker_price = 130.0
+        with caplog.at_level(logging.WARNING, logger="trading_bot.live.runner"):
+            runner.run_once()
+
+        state = LiveState.load(cfg.state_path)
+        # Без догон-логики были бы сделки buy-sell-buy по устаревшим сигналам;
+        # теперь исполнен только сигнал последней свечи — один buy.
+        assert [t["side"] for t in state.trades] == ["buy"]
+        assert state.position is not None
+        assert state.last_candle_ts == _last_candle_iso(len(FLAT) + 3)
+        assert "catch-up after downtime" in caplog.text
+        assert "2 stale candle(s)" in caplog.text
+
+    def test_single_candle_batch_trades_as_before(self, tmp_path) -> None:
+        runner, fake, cfg = self._warm_runner(tmp_path)
+        append_candle(fake, [*FLAT, 125.0])
+        fake.ticker_price = 125.0
+        runner.run_once()
+
+        state = LiveState.load(cfg.state_path)
+        assert [t["side"] for t in state.trades] == ["buy"]
+        assert state.position is not None
+        assert state.last_candle_ts == _last_candle_iso(len(FLAT) + 1)
+
+
+class TestEntryPersistence:
+    """M4: позиция сохраняется сразу после исполнения, а не в конце цикла."""
+
+    def test_crash_after_entry_fill_keeps_position_on_disk(self, tmp_path) -> None:
+        runner, fake, cfg = make_runner(tmp_path, closes=FLAT, ticker_price=BREAKOUT_CLOSE)
+        runner.run_once()
+        append_candle(fake, [*FLAT, BREAKOUT_CLOSE])
+        fake.ticker_price = BREAKOUT_CLOSE
+
+        # Крэш сразу после fill: стратегия падает в on_fill, который вызывается
+        # ПОСЛЕ сохранения state — позиция обязана уже быть на диске.
+        def crash(_fill) -> None:
+            raise RuntimeError("process killed right after entry fill")
+
+        runner.strategy.on_fill = crash
+        with pytest.raises(RuntimeError, match="process killed"):
+            runner._run_cycle()
+
+        state = LiveState.load(cfg.state_path)
+        assert state.position is not None
+        assert [t["side"] for t in state.trades] == ["buy"]
+        assert state.active_stop is not None
+
+
+class TestEntrySizing:
+    """m6: сайзинг входа считается по цене тикера, а не close сигнальной свечи."""
+
+    def test_entry_quantity_uses_ticker_price(self, tmp_path) -> None:
+        # Тикер (100) сильно ниже close сигнальной свечи (120).
+        runner, fake, cfg = make_runner(tmp_path, closes=FLAT, ticker_price=100.0)
+        runner.run_once()
+        append_candle(fake, [*FLAT, BREAKOUT_CLOSE])
+        runner.run_once()
+
+        expected_qty = math.floor(START_CASH * 0.95 / 100.0 * 10**6) / 10**6
+        state = LiveState.load(cfg.state_path)
+        assert state.position.quantity == pytest.approx(expected_qty)
 
 
 def build_client(fake):

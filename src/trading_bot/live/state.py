@@ -66,8 +66,11 @@ class LiveState:
             эквити берётся с биржи.
         trades: список исполненных сделок (side, price, quantity, ts, reason, fee).
         needs_attention: флаг «состояние неясно» (например, ордер в testnet
-            не дошёл или его статус неизвестен); торгуем блокируется до
+            не дошёл или его статус неизвестен); торговля блокируется до
             ручного разбора.
+        attention_reason: человекочитаемая причина флага ``needs_attention``
+            (что именно неясно и что проверять на бирже); ``None``, пока флаг
+            не поднят.
     """
 
     version: int = STATE_VERSION
@@ -83,14 +86,18 @@ class LiveState:
     equity: float = 0.0
     trades: list[dict] = field(default_factory=list)
     needs_attention: bool = False
+    attention_reason: str | None = None
 
     def apply_fill(self, fill: FillResult) -> None:
         """Применить исполнение к позиции, equity и списку сделок.
 
         Покупка открывает позицию (пирамидинг не поддерживается), продажа
-        закрывает её целиком (частичные закрытия запрещены). Equity — кэш:
-        покупка уменьшает на объём и комиссию, продажа увеличивает на выручку
-        минус комиссию.
+        закрывает её целиком. Частичная продажа (исполнено меньше объёма
+        позиции, напр. при ручном закрытии части на бирже) уменьшает позицию,
+        но НЕ закрывает её: остаток остаётся без стоп/тейк-уровней, поэтому
+        поднимается ``needs_attention`` с текстом о ручном разборе. Equity —
+        кэш: покупка уменьшает на объём и комиссию, продажа увеличивает на
+        выручку минус комиссию.
         """
         record = {
             "side": fill.side,
@@ -115,7 +122,19 @@ class LiveState:
             if self.position is None:
                 raise RuntimeError("no position to sell")
             self.equity += fill.quantity * fill.price - fill.fee
-            self.position = None
+            if fill.quantity < self.position.quantity:
+                # Частичное закрытие: остаток позиции жив, но его объём на
+                # бирже больше не совпадает с нашим расчётом по сделкам —
+                # стопы остаются, торговля встаёт до ручного разбора.
+                remaining = self.position.quantity - fill.quantity
+                self.position.quantity = remaining
+                self.mark_needs_attention(
+                    f"partial sell filled {fill.quantity} @ {fill.price:.4f}: "
+                    f"{remaining} remains open without confirmed stops; "
+                    "verify the exchange position and stops manually"
+                )
+            else:
+                self.position = None
         else:
             raise ValueError(f"fill side must be 'buy' or 'sell', got {fill.side!r}")
 
@@ -139,9 +158,14 @@ class LiveState:
             return None
         return pd.Timestamp(self.last_candle_ts)
 
-    def mark_needs_attention(self) -> None:
-        """Выставить флаг «требуется внимание человека» (торговля блокируется)."""
+    def mark_needs_attention(self, reason: str) -> None:
+        """Выставить флаг «требуется внимание человека» с текстом причины.
+
+        Торговля блокируется до ручного разбора: все новые ордера запрещены,
+        пока флаг не снят правкой state-файла.
+        """
         self.needs_attention = True
+        self.attention_reason = reason
 
     def ensure_matches_config(self, config: LiveConfig) -> None:
         """Проверить, что зафиксированное состояние соответствует текущему конфигу.
