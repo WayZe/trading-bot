@@ -16,7 +16,7 @@ from trading_bot.data.storage import CandleStorage
 runner = CliRunner()
 
 
-def _make_run_dir(tmp_path: Path, with_candles: bool = True) -> Path:
+def _make_run_dir(tmp_path: Path, with_candles: bool = True, with_benchmark: bool = False) -> Path:
     """Create a mini run directory (equity + trades + meta) in tmp_path."""
     run = tmp_path / "reports" / "last_run"
     run.mkdir(parents=True, exist_ok=True)
@@ -28,6 +28,14 @@ def _make_run_dir(tmp_path: Path, with_candles: bool = True) -> Path:
         name="equity",
     )
     equity.to_frame().to_parquet(run / "equity.parquet", engine="pyarrow")
+
+    if with_benchmark:
+        benchmark = pd.Series(
+            [10_000, 10_050, 10_100, 10_080, 10_150, 10_200, 10_180, 10_250],
+            index=index,
+            name="equity",
+        )
+        benchmark.to_frame().to_parquet(run / "benchmark.parquet", engine="pyarrow")
 
     trades = pd.DataFrame(
         {
@@ -66,10 +74,25 @@ def test_report_builds_table_and_plots(tmp_path: Path, monkeypatch) -> None:
     assert "sma_cross · BTC/USDT · 4h" in result.output
     assert "Доходность" in result.output
     assert "Profit factor" in result.output
+    assert "Buy & hold" not in result.output  # no benchmark artifact
     equity_png = run / "equity.png"
     trades_png = run / "trades.png"
     assert equity_png.exists() and equity_png.stat().st_size > 0
     assert trades_png.exists() and trades_png.stat().st_size > 0
+
+
+def test_report_with_benchmark_shows_comparison(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    run = _make_run_dir(tmp_path, with_benchmark=True)
+
+    result = runner.invoke(app, ["report", "--run-dir", str(run)])
+
+    assert result.exit_code == 0, result.output
+    assert "Стратегия vs Buy & hold" in result.output
+    assert "Максимальная просадка" in result.output
+    assert "Коэффициент Шарпа" in result.output
+    assert (run / "equity.png").exists()
+    assert (run / "equity.png").stat().st_size > 0
 
 
 def test_report_accepts_explicit_candles_path(tmp_path: Path, monkeypatch) -> None:
@@ -153,6 +176,7 @@ def test_backtest_runs_and_writes_artifacts(tmp_path: Path, monkeypatch) -> None
     assert "сделок" in result.output
     last_run = tmp_path / "reports" / "last_run"
     assert (last_run / "equity.parquet").exists()
+    assert (last_run / "benchmark.parquet").exists()
     assert (last_run / "trades.csv").exists()
     assert (last_run / "meta.json").exists()
     meta = json.loads((last_run / "meta.json").read_text(encoding="utf-8"))
@@ -160,6 +184,8 @@ def test_backtest_runs_and_writes_artifacts(tmp_path: Path, monkeypatch) -> None
     assert meta["summary"]["n_candles"] == 60
     assert meta["summary"]["start_cash"] == 10_000.0
     assert meta["summary"]["n_trades"] >= 0
+    benchmark = pd.read_parquet(last_run / "benchmark.parquet", engine="pyarrow")
+    assert benchmark["equity"].iloc[0] == 10_000.0  # start_cash at the first close
 
 
 def test_backtest_without_data_fails_with_hint(tmp_path: Path, monkeypatch) -> None:

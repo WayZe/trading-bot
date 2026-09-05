@@ -75,6 +75,24 @@ class MetricsReport:
         return self.span_days * MS_PER_DAY < YEAR_MS
 
 
+@dataclass(frozen=True)
+class BenchmarkMetrics:
+    """Buy & hold benchmark metrics over the same period as a backtest.
+
+    Attributes:
+        total_return_pct: ``(final / first - 1) * 100``.
+        cagr_pct: annualized total return; ``None`` for a single-point curve.
+        sharpe: annualized Sharpe ratio of per-candle returns (risk-free
+            rate 0); ``None`` when the dispersion is zero or undefined.
+        max_drawdown_pct: deepest peak-to-trough decline, in percent (<= 0).
+    """
+
+    total_return_pct: float
+    cagr_pct: float | None
+    sharpe: float | None
+    max_drawdown_pct: float
+
+
 def compute_metrics(
     equity: pd.Series,
     trades: pd.DataFrame,
@@ -102,6 +120,18 @@ def compute_metrics(
     if equity.empty:
         raise ValueError("equity curve is empty: nothing to report")
 
+    equity_metrics = _equity_metrics(equity, timeframe)
+    trade_metrics = _trade_metrics(trades, fee_rate=fee_rate)
+
+    return MetricsReport(**equity_metrics, **trade_metrics)
+
+
+def _equity_metrics(equity: pd.Series, timeframe: str) -> dict[str, float | None]:
+    """Core equity-curve metrics shared by strategy and benchmark reports.
+
+    Returns a dict with ``total_return_pct``, ``final_equity``, ``cagr_pct``,
+    ``sharpe``, ``max_drawdown_pct``, ``max_drawdown_days`` and ``span_days``.
+    """
     values = equity.to_numpy(dtype="float64")
     start_equity = float(values[0])
     final_equity = float(values[-1])
@@ -125,17 +155,51 @@ def compute_metrics(
 
     max_drawdown_pct, max_drawdown_days = _drawdown(equity, values)
 
-    trade_metrics = _trade_metrics(trades, fee_rate=fee_rate)
+    return {
+        "total_return_pct": total_return_pct,
+        "final_equity": final_equity,
+        "cagr_pct": cagr_pct,
+        "sharpe": sharpe,
+        "max_drawdown_pct": max_drawdown_pct,
+        "max_drawdown_days": max_drawdown_days,
+        "span_days": span_days,
+    }
 
-    return MetricsReport(
-        total_return_pct=total_return_pct,
-        final_equity=final_equity,
-        cagr_pct=cagr_pct,
-        sharpe=sharpe,
-        max_drawdown_pct=max_drawdown_pct,
-        max_drawdown_days=max_drawdown_days,
-        span_days=span_days,
-        **trade_metrics,
+
+def benchmark_equity(close: pd.Series, start_cash: float) -> pd.Series:
+    """Build the buy & hold equity curve from candle closes.
+
+    The full ``start_cash`` is invested at the first close; the curve is
+    ``start_cash * close / close[0]`` over the same index. Pure function.
+
+    Raises:
+        ValueError: if ``close`` is empty or starts at zero.
+    """
+    if close.empty:
+        raise ValueError("close series is empty: nothing to benchmark")
+    first_close = float(close.iloc[0])
+    if first_close == 0.0:
+        raise ValueError("first close is zero: cannot build the benchmark curve")
+    return start_cash * close.astype("float64") / first_close
+
+
+def compute_benchmark_metrics(equity: pd.Series, timeframe: str) -> BenchmarkMetrics:
+    """Compute buy & hold metrics from a benchmark equity curve.
+
+    Reuses the same formulas as :func:`compute_metrics` (via the shared
+    equity helpers), without trade metrics.
+
+    Raises:
+        ValueError: if the equity curve is empty or the timeframe is invalid.
+    """
+    if equity.empty:
+        raise ValueError("equity curve is empty: nothing to report")
+    fields = _equity_metrics(equity, timeframe)
+    return BenchmarkMetrics(
+        total_return_pct=fields["total_return_pct"],
+        cagr_pct=fields["cagr_pct"],
+        sharpe=fields["sharpe"],
+        max_drawdown_pct=fields["max_drawdown_pct"],
     )
 
 

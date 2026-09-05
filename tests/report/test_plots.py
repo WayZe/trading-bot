@@ -54,6 +54,19 @@ def test_plot_equity_creates_non_empty_png(tmp_path: Path) -> None:
     assert path.stat().st_size > 0
 
 
+def test_plot_equity_with_benchmark_overlay(tmp_path: Path) -> None:
+    path = tmp_path / "equity.png"
+    index = pd.date_range("2025-08-01", periods=50, freq="4h", tz="UTC")
+    benchmark = pd.Series(
+        [10_000.0 + 20.0 * i for i in range(50)], index=index, name="equity"
+    )
+
+    plot_equity(make_equity(), path, benchmark=benchmark)
+
+    assert path.exists()
+    assert path.stat().st_size > 0
+
+
 def test_plot_trades_creates_non_empty_png(tmp_path: Path) -> None:
     path = tmp_path / "trades.png"
 

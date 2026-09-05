@@ -7,7 +7,13 @@ import math
 import pandas as pd
 import pytest
 
-from trading_bot.report.metrics import compute_metrics
+from trading_bot.report.metrics import (
+    MS_PER_DAY,
+    YEAR_MS,
+    benchmark_equity,
+    compute_benchmark_metrics,
+    compute_metrics,
+)
 
 
 def make_equity(values: list[float], start: str = "2024-01-01", freq: str = "D"):
@@ -209,3 +215,59 @@ class TestTradeMetrics:
 
         assert daily.sharpe is not None and four_hour.sharpe is not None
         assert four_hour.sharpe == pytest.approx(daily.sharpe * math.sqrt(6.0))
+
+
+class TestBenchmark:
+    def test_benchmark_equity_exact_math(self) -> None:
+        close = pd.Series(
+            [50.0, 75.0, 100.0],
+            index=pd.date_range("2024-01-01", periods=3, freq="D", tz="UTC"),
+        )
+
+        benchmark = benchmark_equity(close, 1000.0)
+
+        assert benchmark.index.equals(close.index)
+        assert benchmark.iloc[0] == pytest.approx(1000.0)
+        assert benchmark.iloc[1] == pytest.approx(1500.0)
+        assert benchmark.iloc[2] == pytest.approx(2000.0)
+
+    def test_benchmark_equity_empty_raises(self) -> None:
+        close = pd.Series([], dtype="float64", index=pd.DatetimeIndex([], tz="UTC"))
+
+        with pytest.raises(ValueError, match="empty"):
+            benchmark_equity(close, 1000.0)
+
+    def test_compute_benchmark_metrics_manual_series(self) -> None:
+        # Closes grow +10%, -5%, +10% -> per-day returns 0.1, -0.05, 0.1.
+        close = pd.Series(
+            [100.0, 110.0, 104.5, 114.95],
+            index=pd.date_range("2024-01-01", periods=4, freq="D", tz="UTC"),
+        )
+
+        metrics = compute_benchmark_metrics(benchmark_equity(close, 1000.0), "1d")
+
+        assert metrics.total_return_pct == pytest.approx(14.95)
+        expected_sharpe = 0.05 / math.sqrt(0.0075) * math.sqrt(365.25)
+        assert metrics.sharpe == pytest.approx(expected_sharpe)
+        assert metrics.max_drawdown_pct == pytest.approx(-5.0)  # 1045 vs peak 1100
+        years = 3.0 * MS_PER_DAY / YEAR_MS
+        assert metrics.cagr_pct == pytest.approx((1.1495 ** (1.0 / years) - 1.0) * 100.0)
+
+    def test_compute_benchmark_metrics_single_point(self) -> None:
+        close = pd.Series(
+            [100.0],
+            index=pd.DatetimeIndex(["2024-01-01"], tz="UTC"),
+        )
+
+        metrics = compute_benchmark_metrics(benchmark_equity(close, 1000.0), "1d")
+
+        assert metrics.total_return_pct == 0.0
+        assert metrics.cagr_pct is None
+        assert metrics.sharpe is None
+        assert metrics.max_drawdown_pct == 0.0
+
+    def test_compute_benchmark_metrics_empty_raises(self) -> None:
+        equity = pd.Series([], dtype="float64", index=pd.DatetimeIndex([], tz="UTC"))
+
+        with pytest.raises(ValueError, match="empty"):
+            compute_benchmark_metrics(equity, "1d")

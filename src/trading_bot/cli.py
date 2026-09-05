@@ -19,7 +19,13 @@ from trading_bot.data.exchange import ExchangeClient
 from trading_bot.data.storage import CandleStorage
 from trading_bot.engine.backtest import BacktestEngine, BacktestResult
 from trading_bot.engine.broker import SimulatedBroker
-from trading_bot.report import MetricsReport, compute_metrics
+from trading_bot.report import (
+    BenchmarkMetrics,
+    MetricsReport,
+    benchmark_equity,
+    compute_benchmark_metrics,
+    compute_metrics,
+)
 from trading_bot.report.plots import plot_equity, plot_trades
 from trading_bot.risk import RiskManager
 from trading_bot.strategy import create_strategy
@@ -141,9 +147,13 @@ def backtest(
     )
     result = engine.run(candles)
 
+    # Buy & hold benchmark over exactly the tested range (the candle slice
+    # fed to the engine), fully invested in the asset at the first close.
+    benchmark = benchmark_equity(candles.set_index("timestamp")["close"], cfg.start_cash)
+
     summary = _summary(cfg, result)
     _print_summary(summary)
-    _save_artifacts(result, cfg, summary)
+    _save_artifacts(result, benchmark, cfg, summary)
 
 
 def _slice_candles(candles: pd.DataFrame, cfg: BacktestConfig) -> pd.DataFrame:
@@ -215,10 +225,15 @@ def _print_summary(summary: dict) -> None:
     typer.echo("Сводка и графики: uv run trading-bot report")
 
 
-def _save_artifacts(result: BacktestResult, cfg: BacktestConfig, summary: dict) -> None:
-    """Write equity.parquet, trades.csv and meta.json to reports/last_run/."""
+def _save_artifacts(
+    result: BacktestResult, benchmark: pd.Series, cfg: BacktestConfig, summary: dict
+) -> None:
+    """Write equity.parquet, trades.csv, benchmark.parquet and meta.json."""
     LAST_RUN_DIR.mkdir(parents=True, exist_ok=True)
     result.equity_curve.to_frame().to_parquet(LAST_RUN_DIR / "equity.parquet", engine="pyarrow")
+    benchmark.to_frame("equity").to_parquet(
+        LAST_RUN_DIR / "benchmark.parquet", engine="pyarrow"
+    )
     result.trades.to_csv(LAST_RUN_DIR / "trades.csv", index=False)
     meta = {"config": cfg.model_dump(mode="json"), "summary": summary}
     with (LAST_RUN_DIR / "meta.json").open("w", encoding="utf-8") as file:
@@ -244,10 +259,14 @@ def report(
     timeframe = str(cfg.get("timeframe", "1d"))
 
     metrics = compute_metrics(equity, trades, timeframe, fee_rate=cfg.get("fee_rate"))
-    _print_report(cfg, equity, metrics)
+    benchmark = _load_benchmark(run_dir)
+    benchmark_metrics = (
+        compute_benchmark_metrics(benchmark, timeframe) if benchmark is not None else None
+    )
+    _print_report(cfg, equity, metrics, benchmark_metrics)
 
     equity_png = run_dir / "equity.png"
-    plot_equity(equity, equity_png)
+    plot_equity(equity, equity_png, benchmark=benchmark)
     typer.echo(f"График эквити: {equity_png}")
 
     candles_path = _resolve_candles(candles, cfg, timeframe)
@@ -274,6 +293,19 @@ def _load_run(run_dir: Path) -> tuple[pd.Series, pd.DataFrame, dict]:
         typer.echo(f"Не удалось прочитать артефакты прогона в {run_dir}: {error}")
         raise typer.Exit(code=1) from error
     return equity, trades, meta
+
+
+def _load_benchmark(run_dir: Path) -> pd.Series | None:
+    """Load the optional buy & hold benchmark artifact (``None`` when absent)."""
+    path = run_dir / "benchmark.parquet"
+    if not path.is_file():
+        return None
+    try:
+        frame = pd.read_parquet(path, engine="pyarrow")
+        return frame.iloc[:, 0] if isinstance(frame, pd.DataFrame) else frame
+    except (OSError, ValueError) as error:
+        typer.echo(f"Не удалось прочитать {path}: сравнение с buy & hold пропущено ({error})")
+        return None
 
 
 def _resolve_candles(candles: Path | None, cfg: dict, timeframe: str) -> Path | None:
@@ -309,8 +341,14 @@ def _fmt_opt(value: float | None, fmt) -> str:
     return "—" if value is None else fmt(value)
 
 
-def _print_report(cfg: dict, equity: pd.Series, metrics: MetricsReport) -> None:
+def _print_report(
+    cfg: dict,
+    equity: pd.Series,
+    metrics: MetricsReport,
+    benchmark: BenchmarkMetrics | None = None,
+) -> None:
     """Print the metrics table to the console (rich is a typer dependency)."""
+    console = Console()
     table = Table(
         title=f"Отчёт бэктеста: {cfg.get('strategy', '?')} · "
         f"{cfg.get('symbol', '?')} · {cfg.get('timeframe', '?')}",
@@ -351,9 +389,43 @@ def _print_report(cfg: dict, equity: pd.Series, metrics: MetricsReport) -> None:
     )
     table.add_row("Комиссии (оценка)", _fmt_opt(metrics.total_fees, _fmt_money))
 
-    Console().print(table)
+    console.print(table)
     if metrics.short_span:
         typer.echo("* период меньше года: годовая доходность (CAGR) экстраполирована")
+
+    if benchmark is not None:
+        _print_benchmark_comparison(console, metrics, benchmark)
+
+
+def _print_benchmark_comparison(
+    console: Console, metrics: MetricsReport, benchmark: BenchmarkMetrics
+) -> None:
+    """Print the strategy vs buy & hold comparison table."""
+    table = Table(title="Стратегия vs Buy & hold", title_justify="left")
+    table.add_column("Метрика", no_wrap=True)
+    table.add_column("Стратегия", justify="right")
+    table.add_column("Buy & hold", justify="right")
+    table.add_row(
+        "Доходность",
+        _fmt_pct(metrics.total_return_pct),
+        _fmt_pct(benchmark.total_return_pct),
+    )
+    table.add_row(
+        "Годовая доходность (CAGR)",
+        _fmt_opt(metrics.cagr_pct, _fmt_pct),
+        _fmt_opt(benchmark.cagr_pct, _fmt_pct),
+    )
+    table.add_row(
+        "Максимальная просадка",
+        _fmt_pct(metrics.max_drawdown_pct),
+        _fmt_pct(benchmark.max_drawdown_pct),
+    )
+    table.add_row(
+        "Коэффициент Шарпа (аннуал.)",
+        _fmt_opt(metrics.sharpe, lambda v: f"{v:.2f}"),
+        _fmt_opt(benchmark.sharpe, lambda v: f"{v:.2f}"),
+    )
+    console.print(table)
 
 
 def main() -> None:
