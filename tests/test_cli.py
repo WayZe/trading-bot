@@ -312,6 +312,22 @@ class TestSweep:
         assert result.exit_code != 0
         assert "name=v1,v2,..." in result.output
 
+    @pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+    def test_non_finite_param_fails_cleanly(
+        self, tmp_path: Path, monkeypatch, value: str
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        config = tmp_path / "backtest.yaml"
+        config.write_text(SWEEP_CONFIG, encoding="utf-8")
+
+        result = runner.invoke(
+            app, ["sweep", "--config", str(config), "--param", f"atr_mult={value}"]
+        )
+
+        assert result.exit_code != 0
+        assert "конечным" in result.output
+        assert "Traceback" not in result.output
+
 
 class TestParseGrid:
     def test_coerces_int_float_and_str(self) -> None:
@@ -326,6 +342,13 @@ class TestParseGrid:
 
         with pytest.raises(BadParameter):
             _parse_grid(["fast=1", "fast=2"])
+
+    @pytest.mark.parametrize("spec", ["atr_mult=nan", "atr_mult=inf", "fast=Infinity"])
+    def test_non_finite_value_fails(self, spec: str) -> None:
+        from typer import BadParameter
+
+        with pytest.raises(BadParameter, match="конечным"):
+            _parse_grid([spec])
 
 
 class TestSymbolTimeframeOverrides:

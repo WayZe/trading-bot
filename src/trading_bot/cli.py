@@ -218,15 +218,25 @@ def _parse_grid(specs: list[str] | None) -> dict[str, list]:
 
 
 def _coerce_scalar(raw: str) -> int | float | str:
-    """Coerce a grid value: int-like strings to int, numeric to float, else str."""
+    """Coerce a grid value: int-like strings to int, numeric to float, else str.
+
+    Non-finite numbers (``nan``, ``inf``) are rejected: they would poison
+    every combination in the sweep instead of failing loudly once.
+    """
     try:
         return int(raw)
     except ValueError:
         pass
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError:
         return raw
+    if not math.isfinite(value):
+        raise typer.BadParameter(
+            f"значение {raw!r} должно быть конечным числом "
+            "(nan/inf в сетке параметров не допускаются)"
+        )
+    return value
 
 
 @app.command()

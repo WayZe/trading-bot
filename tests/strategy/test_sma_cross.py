@@ -76,6 +76,26 @@ class TestContract:
             create_strategy("sma_cross", {"unexpected": 1})
 
 
+class TestValidation:
+    @pytest.mark.parametrize(
+        ("kwargs", "match"),
+        [
+            ({"fast": "3"}, "must be an integer"),
+            ({"slow": 6.0}, "must be an integer"),
+            ({"atr_period": None}, "must be an integer"),
+            ({"fast": 0}, "must be >= 1"),
+            ({"atr_mult": float("nan")}, "must be finite"),
+            ({"atr_mult": float("inf")}, "must be finite"),
+            ({"atr_mult": "2"}, "must be a number"),
+            ({"atr_mult": 0.0}, "must be positive"),
+            ({"atr_mult": -1.0}, "must be positive"),
+        ],
+    )
+    def test_bad_params_raise_value_error(self, kwargs: dict, match: str) -> None:
+        with pytest.raises(ValueError, match=match):
+            SmaCrossStrategy(**kwargs)
+
+
 class TestEntry:
     def test_single_cross_up_emits_one_long_entry(self) -> None:
         strategy = make_strategy()

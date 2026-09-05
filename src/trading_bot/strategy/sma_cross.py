@@ -39,10 +39,17 @@ class SmaCrossStrategy(Strategy):
         atr_period: int = 14,
         atr_mult: float = 2.0,
     ) -> None:
+        for param_name, value in (("fast", fast), ("slow", slow), ("atr_period", atr_period)):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{param_name} must be an integer, got {value!r}")
         if fast < 1 or slow < 1 or atr_period < 1:
             raise ValueError("fast, slow and atr_period must be >= 1")
         if fast >= slow:
             raise ValueError(f"fast ({fast}) must be smaller than slow ({slow})")
+        if isinstance(atr_mult, bool) or not isinstance(atr_mult, (int, float)):
+            raise ValueError(f"atr_mult must be a number, got {atr_mult!r}")
+        if not math.isfinite(atr_mult):
+            raise ValueError(f"atr_mult must be finite, got {atr_mult!r}")
         if atr_mult <= 0:
             raise ValueError(f"atr_mult must be positive, got {atr_mult}")
         self.fast = fast
