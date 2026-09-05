@@ -101,18 +101,25 @@ class HistoryDownloader:
     ) -> pd.DataFrame:
         """Загрузить свечи за ``[since, until)`` (даты UTC).
 
-        ``until`` по умолчанию — текущая дата UTC. Свечи, чей бакет ещё
-        открыт (``timestamp + timeframe > now``), отбрасываются: возвращаются
-        только закрытые свечи. Бросает ``ValueError``, если биржа не вернула
-        вообще никаких данных или валидация не проходит даже после
-        заполнения гэпов.
+        ``until`` по умолчанию — текущий момент: возвращаются все закрытые
+        свечи (открытый хвост отбрасывается: свеча закрыта ⟺
+        ``timestamp + timeframe <= now``). Бросает ``ValueError``, если биржа
+        не вернула вообще никаких данных или валидация не проходит даже
+        после заполнения гэпов.
         """
         since_date = _as_date(since, name="since")
-        until_date = _as_date(until, name="until", default=datetime.now(UTC).date())
         since_ms = _date_to_ms(since_date)
-        until_ms = _date_to_ms(until_date)
+        if until is None:
+            # До текущего момента, а не до полуночи «сегодня»: закрытые свечи
+            # текущего дня (например, при начальной догрузке live-раннера)
+            # не должны теряться до завтрашнего апдейта.
+            until_ms = _now_ms()
+            until_label = _ms_to_iso(until_ms)
+        else:
+            until_ms = _date_to_ms(_as_date(until, name="until"))
+            until_label = str(until)
         logger.info(
-            "downloading %s %s from %s to %s", symbol, timeframe, since_date, until_date
+            "downloading %s %s from %s to %s", symbol, timeframe, since_date, until_label
         )
         return self._download_ms(symbol, timeframe, since_ms, until_ms)
 

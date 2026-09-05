@@ -247,3 +247,19 @@ class TestOpenCandleFilter:
 
         with pytest.raises(ValueError, match="still open"):
             downloader.download("BTC/USDT", "1h", since="2025-08-01")
+
+    def test_default_until_is_now_includes_same_day_closed_candles(self, mocker) -> None:
+        # Без until граница — текущий момент, а не полночь «сегодня»: закрытые
+        # свечи текущего дня не должны теряться (важно для начальной догрузки
+        # live-раннера, иначе первый цикл отстаёт на несколько часов).
+        mocker.patch(
+            "trading_bot.data.downloader._now_ms",
+            return_value=BASE_MS + 50 * HOUR_MS + HOUR_MS // 2,
+        )
+        exchange = FakeExchange(make_candles(50))
+        downloader = HistoryDownloader(exchange)
+
+        df = downloader.download("BTC/USDT", "1h", since="2025-08-01")
+
+        assert len(df) == 50
+        assert exchange.calls[0] == BASE_MS
