@@ -10,8 +10,10 @@ from trading_bot.engine.backtest import BacktestEngine
 from trading_bot.engine.broker import SimulatedBroker
 from trading_bot.indicators import atr as atr_indicator
 from trading_bot.risk import RiskManager
+from trading_bot.strategy import STRATEGY_REGISTRY, create_strategy
 from trading_bot.strategy.base import Fill, Signal, SignalKind
 from trading_bot.strategy.donchian import DonchianBreakoutStrategy
+from trading_bot.strategy.trend_filter import TrendFiltered
 
 # Базовая свеча: close 100, high 101, low 99. При шагах, не выводящих
 # истинный диапазон за 2.0, Wilder-ATR(3) после прогрева равен ровно 2.0.
@@ -317,6 +319,76 @@ class TestReset:
 FEE = 0.001
 SLIP = 5.0  # bps
 START_CASH = 1_000.0
+
+
+class TestRegistry:
+    def test_donchian_registered(self) -> None:
+        assert "donchian" in STRATEGY_REGISTRY
+        assert "donchian_trend" in STRATEGY_REGISTRY
+
+    def test_create_donchian(self) -> None:
+        strategy = create_strategy(
+            "donchian",
+            {"entry_period": 5, "exit_period": 2, "atr_period": 3, "atr_mult": 1.5},
+        )
+
+        assert isinstance(strategy, DonchianBreakoutStrategy)
+        assert strategy.entry_period == 5
+        assert strategy.exit_period == 2
+        assert strategy.atr_period == 3
+        assert strategy.atr_mult == 1.5
+        assert strategy.warmup_period == 5 + 3
+
+    def test_create_donchian_bad_params_wrapped(self) -> None:
+        with pytest.raises(ValueError, match=r"invalid strategy_params.*entry_period must be >= 2"):
+            create_strategy("donchian", {"entry_period": 1})
+
+    def test_create_donchian_trend_splits_params(self) -> None:
+        # Раскладка: entry/exit/atr_* -> внутренняя стратегия,
+        # trend_period/trend_source -> обёртка TrendFiltered.
+        strategy = create_strategy(
+            "donchian_trend",
+            {
+                "entry_period": 5,
+                "exit_period": 2,
+                "atr_period": 3,
+                "atr_mult": 1.5,
+                "trend_period": 100,
+                "trend_source": "open",
+            },
+        )
+
+        assert isinstance(strategy, TrendFiltered)
+        assert isinstance(strategy.inner, DonchianBreakoutStrategy)
+        assert strategy.inner.entry_period == 5
+        assert strategy.inner.exit_period == 2
+        assert strategy.inner.atr_period == 3
+        assert strategy.inner.atr_mult == 1.5
+        assert strategy.trend_period == 100
+        assert strategy.trend_source == "open"
+        assert strategy.name == "donchian_trend100_open"
+        assert strategy.warmup_period == 100
+
+    def test_create_donchian_trend_inner_defaults(self) -> None:
+        strategy = create_strategy("donchian_trend", {"trend_period": 200})
+
+        assert isinstance(strategy, TrendFiltered)
+        assert isinstance(strategy.inner, DonchianBreakoutStrategy)
+        assert (strategy.inner.entry_period, strategy.inner.exit_period) == (20, 10)
+        assert strategy.name == "donchian_trend200"
+        assert strategy.warmup_period == 200
+
+    def test_create_donchian_trend_unknown_param(self) -> None:
+        with pytest.raises(ValueError, match="invalid strategy_params"):
+            create_strategy("donchian_trend", {"trend_peryod": 5})
+
+    def test_create_donchian_trend_invalid_inner_value_wrapped(self) -> None:
+        # Ошибка внутренней стратегии всплывает через фабрику с тем же
+        # единым текстом про strategy_params.
+        with pytest.raises(
+            ValueError, match=r"invalid strategy_params.*must be smaller than entry_period"
+        ):
+            create_strategy("donchian_trend", {"entry_period": 5, "exit_period": 5})
 
 
 class TestEngineIntegration:

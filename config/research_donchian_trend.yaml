@@ -1,0 +1,29 @@
+# Конфиг исследовательских прогонов (sweep/walkforward), вариант donchian_trend:
+# DonchianBreakoutStrategy внутри тренд-фильтра TrendFiltered.
+# Пара и таймфрейм переопределяются флагами --symbol/--timeframe CLI.
+# Все даты — UTC, формат YYYY-MM-DD.
+
+symbol: BTC/USDT
+timeframe: 4h
+
+# Полная исследовательская история (совпадает с диапазоном датасетов).
+start: "2023-01-01"
+end: null
+
+start_cash: 10000.0
+position_size_pct: 0.95
+min_notional: 5.0
+quantity_precision: 6
+
+fee_rate: 0.001
+slippage_bps: 5.0
+
+strategy: donchian_trend
+# atr_period фиксирован (не участвует в сетках); entry/exit/atr_mult/trend_period
+# перекрываются --param.
+strategy_params:
+  entry_period: 20
+  exit_period: 10
+  atr_period: 14
+  atr_mult: 2.0
+  trend_period: 200
