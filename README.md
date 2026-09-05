@@ -161,7 +161,7 @@ src/trading_bot/
   engine/          бэктест: broker (комиссия+проскальзывание), portfolio
                    (кэш, позиция, TradeRecord), backtest (event loop)
   strategy/        плагины стратегий: base (Signal/Fill/Strategy ABC),
-                   sma_cross, trend_filter (TrendFiltered, композит),
+                   sma_cross, donchian, trend_filter (TrendFiltered, композит),
                    реестр по имени (класс или фабрика)
   research/        слой исследований: sweep по сетке параметров,
                    walk-forward валидация (IS→OOS окна, stitched-кривая)
@@ -209,6 +209,39 @@ walk-forward по BTC/ETH/SOL с предрегистрацией сетки и 
 в [docs/research/2026-09-05-trend-filter-wf.md](docs/research/2026-09-05-trend-filter-wf.md).
 Спойлер: по сшитой OOS-доходности фильтрованный вариант уступил базовому на
 всех трёх символах.
+
+## Пробой Дончиана: `donchian`
+
+Классика Черепах (`strategy/donchian.py`): вход, когда close пробивает
+**максимум предыдущих** `entry_period` свечей; выход, когда close пробивает
+**минимум предыдущих** `exit_period` свечей (`exit_period` обязан быть меньше
+`entry_period`). Оба канала считаются без текущей свечи (сдвиг 1) — иначе
+пробой был бы невозможен: close не бывает выше собственного high. Входной
+сигнал несёт стоп `close - atr_mult * ATR` (уровень принадлежит движку, как
+у `sma_cross`):
+
+```yaml
+# config/backtest.yaml
+strategy: donchian
+strategy_params:
+  entry_period: 20   # канал входа (длинный)
+  exit_period: 10    # канал выхода (короткий, < entry_period)
+  atr_period: 14
+  atr_mult: 2.0
+```
+
+Как и `sma_cross`, стратегия доступна внутри тренд-фильтра: фабрика
+`donchian_trend` раскладывает параметры так же — `entry_period`/`exit_period`/
+`atr_period`/`atr_mult` во внутреннюю стратегию, `trend_period`/`trend_source`
+в обёртку `TrendFiltered`. Работает во всех командах (`backtest`, `sweep`,
+`walkforward`) и перебирается той же сеткой: `--param entry_period=10,20,40,55`.
+
+Помог ли Дончиан на практике — решает исследование с предрегистрацией
+протокола, а не интуиция:
+[docs/research/2026-09-05-donchian-wf.md](docs/research/2026-09-05-donchian-wf.md).
+Спойлер: сырой критерий (доходность выше B&H с меньшей просадкой) не прошёл
+ни у одного варианта; риск-скорректированный (Sharpe выше B&H) прошёл у
+`donchian_trend` на 2 из 3 символов.
 
 ## Как добавить свою стратегию
 
