@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Annotated
 
@@ -13,11 +15,15 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from trading_bot.config import BacktestConfig, load_config
+from trading_bot.config import BacktestConfig, LiveConfig, load_config, load_live_config
 from trading_bot.data.downloader import EXCHANGE_ID, HistoryDownloader
 from trading_bot.data.exchange import ExchangeClient
 from trading_bot.data.storage import CandleStorage
 from trading_bot.engine.backtest import BacktestResult, build_engine
+from trading_bot.engine.broker import SimulatedBroker
+from trading_bot.live.execution import PaperAdapter, TestnetAdapter
+from trading_bot.live.runner import LiveRunner
+from trading_bot.live.state import load_or_fresh_state
 from trading_bot.report import (
     BenchmarkMetrics,
     MetricsReport,
@@ -47,6 +53,10 @@ SWEEP_DIR = REPORTS_DIR / "sweep" / "last"
 WALKFORWARD_DIR = REPORTS_DIR / "walkforward" / "last"
 
 RUN_FILES = ("equity.parquet", "trades.csv", "meta.json")
+
+# Имена переменных окружения с ключами Bybit testnet (никогда не в конфиге/git/логах).
+ENV_API_KEY = "BYBIT_API_KEY"
+ENV_API_SECRET = "BYBIT_API_SECRET"
 
 # Имена сеток, которые конфликтовали бы с колонками результата sweep.
 _RESERVED_PARAM_NAMES = frozenset(METRIC_COLUMNS) | {"error"}
@@ -112,6 +122,135 @@ def download(
         f"Saved {len(df)} candles ({symbol} {timeframe}): "
         f"{df['timestamp'].iloc[0]} .. {df['timestamp'].iloc[-1]} -> {path}"
     )
+
+
+@app.command()
+def live(
+    config: Annotated[
+        Path, typer.Option(help="Path to the live YAML config.")
+    ] = Path("config/live.yaml"),
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Force paper mode: no API keys, no private exchange calls, "
+            "even if the config says testnet.",
+        ),
+    ] = False,
+    once: Annotated[
+        bool,
+        typer.Option(
+            "--once", help="Run a single cycle and exit (cron-friendly)."
+        ),
+    ] = False,
+) -> None:
+    """Запустить live/paper-раннер: торговля стратегией на закрытых свечах Bybit.
+
+    Режим исполнения берётся из конфига (paper по умолчанию); ``--dry-run``
+    форсирует paper. Состояние (позиция, стопы, последняя обработанная
+    свеча) переживает рестарты через JSON-файл из конфига.
+    """
+    cfg = load_live_config(config)
+    if dry_run and cfg.mode != "paper":
+        typer.echo("--dry-run: forcing paper mode (testnet adapter is disabled)")
+        cfg = LiveConfig.model_validate({**cfg.model_dump(), "mode": "paper"})
+
+    try:
+        strategy = create_strategy(cfg.strategy, cfg.strategy_params)
+    except ValueError as error:
+        typer.echo(f"Ошибка конфигурации стратегии: {error}")
+        raise typer.Exit(code=1) from error
+
+    exchange_client = _build_exchange_client(cfg)
+    try:
+        state = load_or_fresh_state(cfg.state_path, cfg)
+        state.ensure_matches_config(cfg)
+    except ValueError as error:
+        # Битое или чужое состояние: молча перезаписывать нельзя, нужна подсказка.
+        typer.echo(f"Ошибка состояния live: {error}")
+        raise typer.Exit(code=1) from error
+
+    if cfg.mode == "testnet":
+        adapter = TestnetAdapter(exchange_client, cfg.symbol)
+    else:
+        broker = SimulatedBroker(fee_rate=cfg.fee_rate, slippage_bps=cfg.slippage_bps)
+        adapter = PaperAdapter(
+            broker,
+            price_source=lambda: exchange_client.fetch_ticker_last(cfg.symbol),
+            equity_source=lambda: state.equity,
+        )
+
+    runner = LiveRunner(
+        config=cfg,
+        state=state,
+        strategy=strategy,
+        adapter=adapter,
+        exchange_client=exchange_client,
+        storage=CandleStorage(cfg.data_root),
+    )
+    if cfg.mode == "testnet":
+        runner.reconcile()
+    _print_live_banner(cfg, state, runner)
+    _setup_live_logging(cfg.log_file)
+
+    if once:
+        runner.run_once()
+    else:
+        runner.run_forever()
+
+
+def _build_exchange_client(cfg: LiveConfig) -> ExchangeClient:
+    """Создать клиент биржи под режим конфига (ключи — только из окружения).
+
+    Raises:
+        typer.Exit: в режиме testnet без ``BYBIT_API_KEY``/``BYBIT_API_SECRET``
+            — молча торговать без ключей нельзя.
+    """
+    if cfg.mode != "testnet":
+        return ExchangeClient()
+    api_key = os.environ.get(ENV_API_KEY)
+    secret = os.environ.get(ENV_API_SECRET)
+    if not api_key or not secret:
+        typer.echo(
+            f"mode=testnet requires {ENV_API_KEY} and {ENV_API_SECRET} environment "
+            "variables (get testnet keys at https://testnet.bybit.com); "
+            "no keys found, refusing to start."
+        )
+        raise typer.Exit(code=1)
+    return ExchangeClient(api_key=api_key, secret=secret, sandbox=True)
+
+
+def _print_live_banner(cfg: LiveConfig, state, runner: LiveRunner) -> None:
+    """Напечатать стартовую сводку: режим, контур, kill-switch, позиция."""
+    typer.echo(
+        f"Live runner: mode={cfg.mode} symbol={cfg.symbol} timeframe={cfg.timeframe}"
+    )
+    typer.echo(f"Strategy: {cfg.strategy} {cfg.strategy_params}")
+    kill_state = "ACTIVE (orders forbidden)" if runner.kill_switch_active() else "off"
+    typer.echo(f"Kill switch ({cfg.kill_switch_path}): {kill_state}")
+    if state.position is None:
+        typer.echo("Position: flat")
+    else:
+        position = state.position
+        typer.echo(
+            f"Position: {position.quantity:.6f} @ {position.entry_price:.4f} "
+            f"since {position.entry_ts} ({position.entry_reason})"
+        )
+
+
+def _setup_live_logging(log_file: str) -> None:
+    """Добавить rotating file handler к консольному логированию live-раннера."""
+    log_path = Path(log_file)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(
+        log_path, maxBytes=1_000_000, backupCount=5, encoding="utf-8"
+    )
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
+    )
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(handler)
 
 
 @app.command()

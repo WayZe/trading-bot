@@ -6,6 +6,13 @@ import ccxt
 
 from tests.conftest import BASE_MS, HOUR_MS
 from trading_bot.config import LiveConfig
+from trading_bot.data.exchange import ExchangeClient
+from trading_bot.data.storage import CandleStorage
+from trading_bot.engine.broker import SimulatedBroker
+from trading_bot.live.execution import PaperAdapter
+from trading_bot.live.runner import LiveRunner
+from trading_bot.live.state import load_or_fresh_state
+from trading_bot.strategy import create_strategy
 
 FOUR_HOUR_MS = 4 * HOUR_MS
 
@@ -133,3 +140,25 @@ def make_config(tmp_path, **overrides) -> LiveConfig:
     return LiveConfig.model_validate({**base, **overrides})
 
 
+def build_runner(cfg: LiveConfig, fake, adapter=None) -> LiveRunner:
+    """Собрать раннер поверх подмены биржи (state читается с диска, как при рестарте)."""
+    client = ExchangeClient()
+    client.exchange = fake
+    storage = CandleStorage(cfg.data_root)
+    state = load_or_fresh_state(cfg.state_path, cfg)
+    strategy = create_strategy(cfg.strategy, cfg.strategy_params)
+    if adapter is None:
+        broker = SimulatedBroker(fee_rate=cfg.fee_rate, slippage_bps=cfg.slippage_bps)
+        adapter = PaperAdapter(
+            broker,
+            price_source=lambda: client.fetch_ticker_last(cfg.symbol),
+            equity_source=lambda: state.equity,
+        )
+    return LiveRunner(cfg, state, strategy, adapter, client, storage)
+
+
+def make_runner(tmp_path, closes: list[float], ticker_price: float = 100.0, **overrides):
+    """Собрать paper-раннер с подменой ccxt; вернуть ``(runner, fake, cfg)``."""
+    cfg = make_config(tmp_path, **overrides)
+    fake = FakeCcxt(donchian_rows(closes), ticker_price=ticker_price)
+    return build_runner(cfg, fake), fake, cfg

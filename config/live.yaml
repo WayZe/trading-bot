@@ -1,0 +1,61 @@
+# Конфиг live/paper-раннера (шаг 2 роадмапа).
+# Запуск: uv run trading-bot live --config config/live.yaml [--dry-run] [--once]
+#
+# Режимы исполнения:
+#   paper   — симуляция сделок по рыночной цене (тикер), ключи API не нужны;
+#   testnet — реальные ордера на bybit testnet через ccxt; ключи берутся
+#             только из переменных окружения BYBIT_API_KEY / BYBIT_API_SECRET
+#             (в git и логи они не попадают никогда).
+
+# Торговая пара (формат ccxt) и таймфрейм закрытых свечей.
+symbol: BTC/USDT
+timeframe: 4h
+
+# Стратегия (плагин реестра) и её параметры.
+# Значения ниже — устойчивое ядро walk-forward исследования donchian_trend
+# (docs/research/): entry_period=40 / trend_period=100 показали лучший баланс
+# доходности и просадки на OOS-окнах. В MVP переоптимизация в рантайме НЕ
+# выполняется — смена параметров ручная (правка конфига + чистый state).
+strategy: donchian_trend
+strategy_params:
+  entry_period: 40   # канал входа (длинный)
+  exit_period: 10    # канал выхода (короткий, < entry_period)
+  atr_period: 14
+  atr_mult: 2.0      # стоп: close - atr_mult * ATR (переякоривается на цену входа)
+  trend_period: 100  # тренд-фильтр: вход только выше SMA(close, 100)
+
+# Режим исполнения: paper (по умолчанию) | testnet.
+# --dry-run форсирует paper независимо от этого поля.
+mode: paper
+
+# Период опроса биржи основным циклом, секунды.
+poll_seconds: 60
+
+# Издержки paper-исполнения (как в бэктесте):
+#   fee_rate — комиссия taker за сторону сделки (0.001 = 0.1%);
+#   slippage_bps — проскальзывание в базисных пунктах (5 bps = 0.05%).
+fee_rate: 0.001
+slippage_bps: 5.0
+
+# Размер позиции и лимиты (та же семантика, что в BacktestConfig):
+#   start_cash — стартовый капитал paper-режима (в testnet не используется:
+#   эквити берётся с биржи — свободный USDT);
+#   position_size_pct — доля капитала под позицию;
+#   min_notional — минимальная стоимость ордера, меньше — не торгуем;
+#   quantity_precision — до скольки знаков округляется вниз объём входа.
+start_cash: 10000.0
+position_size_pct: 0.95
+min_notional: 5.0
+quantity_precision: 6
+
+# Пути артефактов live-контура (отдельно от research-данных):
+#   data_root         — Parquet со свечами live-датасета (data/live/bybit/...);
+#   state_path        — персистентное состояние (позиция, стопы, последняя свеча);
+#   kill_switch_path  — файл-kill-switch: пока существует, НИКАКИЕ новые ордера
+#                       не размещаются (тикеры/свечи продолжают обрабатываться);
+#                       удалите файл, чтобы возобновить торговлю;
+#   log_file          — rotating-лог раннера.
+data_root: data/live
+state_path: data/live/state.json
+kill_switch_path: data/live/STOP
+log_file: logs/live.log
