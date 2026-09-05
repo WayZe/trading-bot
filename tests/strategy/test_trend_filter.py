@@ -140,6 +140,17 @@ class TestGating:
         full_candles = candles_from_closes([100.0, 101.0, 102.0, 103.0, 104.0])
         assert wrapper.on_candle(full_candles) == [inner.signals_to_emit[0]]
 
+    def test_entry_blocked_when_source_value_is_nan(self) -> None:
+        # NaN в значении источника запрещает вход (консервативная семантика):
+        # сравнение с NaN дало бы False и пропустило сигнал без гейта.
+        inner = StubInner()
+        wrapper = TrendFiltered(inner, trend_period=3)
+        candles = candles_from_closes([101.0, 102.0, 103.0, 104.0, 105.0])
+        candles.loc[candles.index[-1], "close"] = float("nan")
+        inner.signals_to_emit = [make_entry()]
+
+        assert wrapper.on_candle(candles) == []
+
     def test_stop_loss_and_take_profit_passed_through(self) -> None:
         inner = StubInner()
         wrapper = TrendFiltered(inner, trend_period=3)
@@ -156,11 +167,56 @@ class TestGating:
         assert result[0].take_profit == 110.0
 
 
+class TestTrendSource:
+    """Источник тренда: валидация колонки и гейт по не-close колонке."""
+
+    def test_unknown_column_raises_value_error(self) -> None:
+        # Опечатка в trend_source — ошибка конфигурации: ValueError с внятным
+        # текстом на первом on_candle, а не сырой KeyError глубоко в прогоне.
+        wrapper = TrendFiltered(StubInner(), trend_period=3, trend_source="typo")
+        candles = candles_from_closes([100.0, 101.0, 102.0])
+
+        with pytest.raises(ValueError, match=r"trend_source 'typo' is not a candles column"):
+            wrapper.on_candle(candles)
+
+    def test_gate_works_on_open_source(self) -> None:
+        # Гейт работает по open: последняя свеча имеет open=100 (не выше
+        # SMA(open,5)=100), но close=104 — гейт по open обязан заблокировать
+        # вход, который прошёл бы при гейте по close.
+        inner = StubInner()
+        wrapper = TrendFiltered(inner, trend_period=5, trend_source="open")
+        candles = candles_from_closes(STEP_UP_CLOSES)
+        candles.loc[candles.index[-1], "open"] = 100.0
+        candles.loc[candles.index[-1], "low"] = 99.0
+        entry = make_entry()
+        inner.signals_to_emit = [entry]
+
+        assert wrapper.on_candle(candles) == []
+
+        # Контроль: те же свечи под гейтом по close (close=104 выше
+        # SMA(close,5)=100.8) вход пропускают.
+        close_gated = TrendFiltered(inner, trend_period=5)
+        assert close_gated.on_candle(candles) == [entry]
+
+
 class TestContract:
     def test_composite_name(self) -> None:
         wrapper = TrendFiltered(StubInner(), trend_period=7)
 
         assert wrapper.name == "stub_trend7"
+
+    def test_composite_name_source_suffix(self) -> None:
+        # close (в т.ч. по умолчанию) в имя не входит — обратная совместимость
+        # с уже существующими именами вида sma_cross_trend200.
+        assert TrendFiltered(StubInner(), trend_period=7).name == "stub_trend7"
+        assert (
+            TrendFiltered(StubInner(), trend_period=7, trend_source="close").name
+            == "stub_trend7"
+        )
+        assert (
+            TrendFiltered(StubInner(), trend_period=7, trend_source="open").name
+            == "stub_trend7_open"
+        )
 
     def test_warmup_is_max_of_inner_and_trend(self) -> None:
         assert TrendFiltered(StubInner(warmup=3), trend_period=10).warmup_period == 10
@@ -286,3 +342,12 @@ class TestRegistry:
     def test_create_sma_cross_trend_unknown_param(self) -> None:
         with pytest.raises(ValueError, match="invalid strategy_params"):
             create_strategy("sma_cross_trend", {"trend_peryod": 5})
+
+    def test_create_sma_cross_trend_invalid_value_wrapped(self) -> None:
+        # ValueError из конструктора оборачивается так же, как TypeError:
+        # единый текст про strategy_params с сохранением исходного сообщения.
+        with pytest.raises(
+            ValueError,
+            match=r"invalid strategy_params.*trend_period must be >= 1",
+        ):
+            create_strategy("sma_cross_trend", {"trend_period": 0})

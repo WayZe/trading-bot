@@ -314,7 +314,14 @@ class TestSweep:
         )
 
         assert result.exit_code == 0, result.output
-        assert "must be smaller than slow" in result.output
+        # Текст ошибки единообразно оборачивается фабрикой стратегий
+        # (invalid strategy_params ...), полный текст пишется в results.csv.
+        # В таблицу CLI попадает только начало ячейки (колонка «Ошибка»
+        # обрезается по ширине), поэтому там проверяем видимый префикс.
+        assert "invalid strategy_params" in result.output
+        results = pd.read_csv(tmp_path / "reports" / "sweep" / "last" / "results.csv")
+        error_text = " ".join(results["error"].dropna().astype(str))
+        assert "must be smaller than slow" in error_text
 
     def test_without_param_fails_with_hint(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.chdir(tmp_path)

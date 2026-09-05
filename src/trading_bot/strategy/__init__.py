@@ -47,7 +47,7 @@ def create_strategy(name: str, params: dict | None = None) -> Strategy:
         raise ValueError(f"unknown strategy {name!r}; available: {available}")
     try:
         return factory(**(params or {}))
-    except TypeError as error:
+    except (TypeError, ValueError) as error:
         raise ValueError(f"invalid strategy_params for {name!r}: {error}") from error
 
 

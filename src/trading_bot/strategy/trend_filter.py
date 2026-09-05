@@ -18,18 +18,25 @@ class TrendFiltered(Strategy):
 
     Семантика фильтра:
 
-    - гейтится **только** ``LONG_ENTRY``: если close последней закрытой свечи
-      не выше ``sma(trend_source, trend_period)`` (медвежий тренд), входные
-      сигналы ``inner`` отбрасываются, и позиция просто не открывается;
+    - гейтится **только** ``LONG_ENTRY``: если значение ``trend_source``
+      последней закрытой свечи не выше ``sma(trend_source, trend_period)``
+      (медвежий тренд), входные сигналы ``inner`` отбрасываются, и позиция
+      просто не открывается;
     - ``LONG_EXIT`` и приложенные к сигналам стопы/тейки **не фильтруются** —
       выходить из позиции в медвежьем тренде легитимно, а фильтрация выхода
       удерживала бы убыточную позицию; ``stop_loss``/``take_profit``
       входного сигнала передаются движку как есть;
-    - трендовая SMA ещё NaN (свечей меньше ``trend_period``) — вход также
-      запрещён: фильтр консервативен, пока тренд не определён.
+    - NaN в трендовой SMA (свечей меньше ``trend_period``) или в значении
+      ``trend_source`` — вход также запрещён: фильтр консервативен, пока
+      тренд не определён (сравнение с NaN дало бы False и пропустило бы
+      сигнал без гейта);
+    - колонки ``trend_source`` нет в свечах — на первом ``on_candle``
+      поднимается ``ValueError``: это ошибка конфигурации, а не повод
+      молча пропускать сигналы мимо фильтра.
 
     ``name`` — составной, из имени ``inner`` и периода тренда
-    (например ``"sma_cross_trend200"``): в таблицах walk-forward и meta-файлах
+    (например ``"sma_cross_trend200"``; не-``close`` источник добавляется
+    суффиксом: ``"..._trend200_open"``): в таблицах walk-forward и meta-файлах
     видно, какой период фильтра дал результат. ``warmup_period`` — максимум из
     прогрева ``inner`` и ``trend_period``. ``on_fill``/``reset`` делегируются
     ``inner``; собственный кеш трендовой SMA сбрасывается вместе с ним.
@@ -54,23 +61,35 @@ class TrendFiltered(Strategy):
 
     @property
     def name(self) -> str:
-        """Составное имя: ``<inner.name>_trend<trend_period>``."""
-        return f"{self.inner.name}_trend{self.trend_period}"
+        """Составное имя: ``<inner.name>_trend<trend_period>[_<trend_source>]``.
+
+        Суффикс источника добавляется только если он отличается от ``close``
+        (обратная совместимость с именами вида ``sma_cross_trend200``).
+        """
+        if self.trend_source == "close":
+            return f"{self.inner.name}_trend{self.trend_period}"
+        return f"{self.inner.name}_trend{self.trend_period}_{self.trend_source}"
 
     @property
     def warmup_period(self) -> int:
         return max(self.inner.warmup_period, self.trend_period)
 
     def on_candle(self, candles: pd.DataFrame) -> list[Signal]:
+        if self.trend_source not in candles.columns:
+            available = ", ".join(map(str, candles.columns))
+            raise ValueError(
+                f"trend_source {self.trend_source!r} is not a candles column; "
+                f"available: {available}"
+            )
         self._update_indicators(candles)
         signals = self.inner.on_candle(candles)
         if not signals:
             return []
         trend_now = self._trend_line.iloc[-1]
-        close_now = float(candles[self.trend_source].iloc[-1])
-        if math.isnan(trend_now) or close_now <= float(trend_now):
-            # Медвежий тренд (или тренд ещё не определён): входы запрещены,
-            # выходы проходят всегда.
+        source_now = float(candles[self.trend_source].iloc[-1])
+        if math.isnan(trend_now) or math.isnan(source_now) or source_now <= float(trend_now):
+            # Медвежий тренд (или тренд/источник ещё не определён): входы
+            # запрещены, выходы проходят всегда.
             return [s for s in signals if s.kind is not SignalKind.LONG_ENTRY]
         return signals
 
