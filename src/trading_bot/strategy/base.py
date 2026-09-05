@@ -29,9 +29,12 @@ class Signal:
     Attributes:
         kind: what the strategy wants to do.
         reason: human-readable explanation (used in trade records and logs).
-        stop_loss: optional stop price attached to an entry; the engine uses
-            it for intrabar stop checks while the position is open.
-        take_profit: optional take-profit price attached to an entry.
+        stop_loss: optional stop level attached to an entry, expressed
+            against the signal candle's close; the engine re-anchors the
+            distance to the actual entry fill price and uses it for intrabar
+            stop checks while the position is open.
+        take_profit: optional take-profit price attached to an entry
+            (re-anchored to the fill price the same way as ``stop_loss``).
     """
 
     kind: SignalKind

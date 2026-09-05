@@ -12,21 +12,19 @@ from trading_bot.strategy.base import Fill, Signal, SignalKind, Strategy
 
 REASON_CROSS_UP = "sma cross up"
 REASON_CROSS_DOWN = "sma cross down"
-REASON_STOP_BREACH = "stop level breach"
 
 
 class SmaCrossStrategy(Strategy):
     """Long-only strategy: enter when the fast SMA crosses above the slow SMA.
 
     Entry: ``fast[t] > slow[t]`` and ``fast[t-1] <= slow[t-1]``. The emitted
-    signal carries ``stop_loss = close[t] - atr_mult * ATR[t]`` computed on
-    the signal candle's close.
+    signal carries ``stop_loss = close[t] - atr_mult * ATR[t]`` — a stop
+    *distance* defined relative to the signal candle's close. The engine owns
+    the stop: after the entry fills it transfers that distance onto the
+    actual execution price and checks it intrabar.
 
-    Exit: the fast SMA crosses back below the slow one, OR the candle closes
-    below the stop level tracked from the *actual* fill price:
-    ``stop = entry_fill_price - atr_mult * ATR[signal candle]`` (the ATR of
-    the signal candle is stored when the entry signal is emitted). The stop
-    breach takes priority over the cross-down reason.
+    Exit: the fast SMA crosses back below the slow one. There is no separate
+    stop-breach exit here — the engine's intrabar stop is the only stop path.
 
     Indicators are recomputed on the growing candle slice and cached by the
     slice length, which is cheap for the candle counts involved.
@@ -75,33 +73,27 @@ class SmaCrossStrategy(Strategy):
         ):
             return []
 
-        close_now = float(candles["close"].iloc[i])
         cross_up = fast_now > slow_now and fast_prev <= slow_prev
         cross_down = fast_now < slow_now and fast_prev >= slow_prev
 
         if self._in_position:
-            if self._stop_level is not None and close_now < self._stop_level:
-                return [Signal(SignalKind.LONG_EXIT, reason=REASON_STOP_BREACH)]
             if cross_down:
                 return [Signal(SignalKind.LONG_EXIT, reason=REASON_CROSS_DOWN)]
         elif cross_up:
             atr_now = float(self._atr_line.iloc[i])
             if math.isnan(atr_now):
                 return []
-            self._atr_at_entry = atr_now
+            close_now = float(candles["close"].iloc[i])
             stop_loss = close_now - self.atr_mult * atr_now
             return [Signal(SignalKind.LONG_ENTRY, reason=REASON_CROSS_UP, stop_loss=stop_loss)]
         return []
 
     def on_fill(self, fill: Fill) -> None:
+        """Track whether a position is open (used to gate exit signals)."""
         if fill.side == "buy":
             self._in_position = True
-            if self._atr_at_entry is not None:
-                self._stop_level = fill.price - self.atr_mult * self._atr_at_entry
         elif fill.side == "sell":
             self._in_position = False
-            self._stop_level = None
-            self._atr_at_entry = None
 
     def reset(self) -> None:
         self._reset_state()
@@ -112,8 +104,6 @@ class SmaCrossStrategy(Strategy):
         self._slow_line: pd.Series | None = None
         self._atr_line: pd.Series | None = None
         self._in_position = False
-        self._atr_at_entry: float | None = None
-        self._stop_level: float | None = None
 
     def _update_indicators(self, candles: pd.DataFrame) -> None:
         n = len(candles)

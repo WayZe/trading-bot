@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 
 from trading_bot.strategy.base import Fill
@@ -50,8 +52,8 @@ class SimulatedBroker:
             raise ValueError(f"side must be {SIDE_BUY!r} or {SIDE_SELL!r}, got {side!r}")
         if quantity <= 0:
             raise ValueError(f"quantity must be positive, got {quantity}")
-        if price_ref <= 0:
-            raise ValueError(f"price_ref must be positive, got {price_ref}")
+        if math.isnan(price_ref) or price_ref <= 0:
+            raise ValueError(f"price_ref must be a positive number, got {price_ref}")
 
         slippage = self.slippage_bps / 10_000.0
         price = price_ref * (1.0 + slippage) if side == SIDE_BUY else price_ref * (1.0 - slippage)

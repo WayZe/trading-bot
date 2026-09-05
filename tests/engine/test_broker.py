@@ -59,6 +59,14 @@ class TestExecuteMarket:
         with pytest.raises(ValueError, match="quantity"):
             broker.execute_market("buy", 0.0, 100.0, TS, "r")
 
+    def test_nan_price_ref_raises(self) -> None:
+        # NaN silently passes a `price_ref <= 0` check, so it needs an
+        # explicit isnan guard.
+        broker = SimulatedBroker(fee_rate=0.001, slippage_bps=5.0)
+
+        with pytest.raises(ValueError, match="price_ref"):
+            broker.execute_market("buy", 1.0, float("nan"), TS, "r")
+
     def test_negative_costs_rejected_at_construction(self) -> None:
         with pytest.raises(ValueError, match="fee_rate"):
             SimulatedBroker(fee_rate=-0.1, slippage_bps=5.0)

@@ -11,6 +11,13 @@ Per-candle loop (for candle ``i``):
 4. Call ``strategy.on_candle(candles[:i+1])`` and queue resulting signals as
    orders for the next open.
 
+The engine is the single owner of stop-loss/take-profit: the levels carried
+by an entry signal are *distances* defined relative to the signal candle's
+close, and after the entry fills they are re-anchored to the actual fill
+price (``active_stop = fill.price - (stop_ref_close - stop_loss)`` and
+``active_take_profit = fill.price + (take_profit - stop_ref_close)``). A
+non-positive distance after re-anchoring disables the level.
+
 Orders still pending after the last candle are never executed and are
 reported in ``BacktestResult.n_pending_unfilled``; an open position stays in
 ``open_position`` (marked to market in the equity curve) and is not recorded
@@ -43,15 +50,62 @@ REASON_STOP_LOSS = "stop loss"
 REASON_TAKE_PROFIT = "take profit"
 
 
+def _reanchor_below(
+    level: float | None, ref_close: float | None, fill_price: float
+) -> float | None:
+    """Re-anchor a stop level onto the actual fill price.
+
+    The strategy defines the stop distance relative to the signal candle's
+    close (``ref_close - level``); the engine transfers that distance onto the
+    actual entry price so the stop tracks what was really paid. A missing or
+    non-positive distance disables the level.
+    """
+    if level is None or ref_close is None:
+        return None
+    distance = ref_close - level
+    if distance <= 0.0:
+        logger.warning(
+            "stop level %.4f is not below the signal close %.4f: stop disabled",
+            level,
+            ref_close,
+        )
+        return None
+    return fill_price - distance
+
+
+def _reanchor_above(
+    level: float | None, ref_close: float | None, fill_price: float
+) -> float | None:
+    """Re-anchor a take-profit level onto the actual fill price (symmetric)."""
+    if level is None or ref_close is None:
+        return None
+    distance = level - ref_close
+    if distance <= 0.0:
+        logger.warning(
+            "take-profit level %.4f is not above the signal close %.4f: "
+            "take-profit disabled",
+            level,
+            ref_close,
+        )
+        return None
+    return fill_price + distance
+
+
 @dataclass
 class _PendingOrder:
-    """An order queued by a signal, waiting for the next candle's open."""
+    """An order queued by a signal, waiting for the next candle's open.
+
+    ``stop_loss`` / ``take_profit`` are the levels as computed by the strategy
+    against the signal candle's close (``stop_ref_close``); after the fill the
+    engine transfers their distances onto the actual execution price.
+    """
 
     side: str
     quantity: float
     reason: str
     stop_loss: float | None = None
     take_profit: float | None = None
+    stop_ref_close: float | None = None
 
 
 @dataclass
@@ -88,13 +142,23 @@ class BacktestEngine:
         """Run the event loop over ``candles`` and return the result.
 
         Raises:
-            ValueError: if the candles are empty or miss required columns.
+            ValueError: if the candles are empty, miss required columns,
+                contain NaN values in required columns, or violate the
+                ``high >= low`` invariant.
         """
         missing = [col for col in REQUIRED_COLUMNS if col not in candles.columns]
         if missing:
             raise ValueError(f"candles miss required columns: {missing}")
         if candles.empty:
             raise ValueError("candles are empty: nothing to backtest")
+        nan_columns = [col for col in REQUIRED_COLUMNS if candles[col].isna().any()]
+        if nan_columns:
+            raise ValueError(f"candles contain NaN values in columns: {nan_columns}")
+        inverted = candles["high"] < candles["low"]
+        if bool(inverted.any()):
+            raise ValueError(
+                f"candles contain {int(inverted.sum())} candle(s) where high < low"
+            )
 
         n = len(candles)
         warmup = self.strategy.warmup_period
@@ -131,8 +195,12 @@ class BacktestEngine:
                         SIDE_BUY, order.quantity, opens[i], ts, order.reason
                     )
                     portfolio.buy(order.quantity, fill.price, fill.fee, ts)
-                    active_stop = order.stop_loss
-                    active_tp = order.take_profit
+                    active_stop = _reanchor_below(
+                        order.stop_loss, order.stop_ref_close, fill.price
+                    )
+                    active_tp = _reanchor_above(
+                        order.take_profit, order.stop_ref_close, fill.price
+                    )
                     entry_reason = order.reason
                     self.strategy.on_fill(fill)
                     logger.debug(
@@ -263,6 +331,7 @@ class BacktestEngine:
                 reason=signal.reason,
                 stop_loss=signal.stop_loss,
                 take_profit=signal.take_profit,
+                stop_ref_close=close,
             )
 
         if signal.kind is SignalKind.LONG_EXIT:

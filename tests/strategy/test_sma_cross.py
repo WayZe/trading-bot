@@ -7,7 +7,7 @@ import pytest
 
 from tests.conftest import BASE_MS, HOUR_MS, rows_to_df
 from trading_bot.strategy import create_strategy
-from trading_bot.strategy.base import Fill, SignalKind
+from trading_bot.strategy.base import Fill, Signal, SignalKind
 from trading_bot.strategy.sma_cross import SmaCrossStrategy
 
 # Candles are built so that ATR is exactly 2.0 after its warmup:
@@ -147,30 +147,34 @@ class TestExit:
         assert len(exits) == 1
         assert exits[0][1].reason == "sma cross down"
 
-    def test_close_below_fill_based_stop_emits_stop_breach(self) -> None:
+    def test_no_strategy_stop_breach_exit_engine_owns_the_stop(self) -> None:
+        # The stop-breach exit path is gone: even a close below the would-be
+        # fill-based stop (entry close 99 - 2*ATR = 95; the crash closes at
+        # 94.5) can only exit through the SMA cross down — the engine's
+        # intrabar stop is the only stop path left.
         strategy = make_strategy()
-        up = candles_from_closes(UP_CROSS_CLOSES)
+        candles = candles_from_closes(UP_CROSS_CLOSES + [94.5, 94.0, 93.5])
 
-        emitted = feed(strategy, up)
-        entry_index, _ = emitted[0]
-        entry_price = float(up["close"].iloc[entry_index]) + 0.05  # fill w/ slippage
-        strategy.on_fill(make_fill("buy", entry_price, up["timestamp"].iloc[entry_index]))
-        # stop = entry_fill_price - 2 * ATR = entry_price - 4.0;
-        # one deep candle closing below that level.
-        stop = entry_price - 2.0 * ATR_VALUE
-        crash_close = stop - 1.0
-        candles = candles_from_closes(
-            UP_CROSS_CLOSES + [crash_close, crash_close - 0.5, crash_close - 1.0]
-        )
+        exits: list[Signal] = []
+        entry_close: float | None = None
+        in_position = False
+        for i in range(len(candles)):
+            if entry_close is not None and not in_position:
+                # The engine fills the queued entry at this candle's open.
+                strategy.on_fill(
+                    make_fill("buy", entry_close, candles["timestamp"].iloc[i])
+                )
+                in_position = True
+            for signal in strategy.on_candle(candles.iloc[: i + 1]):
+                if signal.kind is SignalKind.LONG_ENTRY:
+                    entry_close = float(candles["close"].iloc[i])
+                elif signal.kind is SignalKind.LONG_EXIT:
+                    exits.append(signal)
 
-        exits = [
-            s
-            for s in strategy.on_candle(candles.iloc[: len(UP_CROSS_CLOSES) + 1])
-            if s.kind is SignalKind.LONG_EXIT
-        ]
-
+        assert entry_close is not None
+        assert entry_close - 2.0 * ATR_VALUE > 94.5  # the crash is below the stop
         assert len(exits) == 1
-        assert exits[0].reason == "stop level breach"
+        assert exits[0].reason == "sma cross down"
 
     def test_no_exit_without_position(self) -> None:
         strategy = make_strategy()
@@ -191,7 +195,6 @@ class TestExit:
 
         # Flat again: the same cross-up re-fires on a fresh identical rise.
         assert strategy._in_position is False
-        assert strategy._stop_level is None
 
 
 class TestReset:
@@ -209,8 +212,6 @@ class TestReset:
         strategy.reset()
 
         assert strategy._in_position is False
-        assert strategy._stop_level is None
-        assert strategy._atr_at_entry is None
         second_run = feed(strategy, candles)
         assert [(i, s.kind, s.reason) for i, s in second_run] == [
             (i, s.kind, s.reason) for i, s in first_run
