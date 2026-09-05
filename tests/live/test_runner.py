@@ -15,6 +15,7 @@ from tests.live.fakes import (
     DONCHIAN_TEST_PARAMS,
     FOUR_HOUR_MS,
     FailingOrderCcxt,
+    FakeCcxt,
     PrivateCcxt,
     append_candle,
     build_runner,
@@ -27,9 +28,10 @@ from trading_bot.data.storage import CandleStorage
 from trading_bot.engine.backtest import BacktestEngine
 from trading_bot.engine.broker import SimulatedBroker
 from trading_bot.live.execution import TestnetAdapter as _TestnetAdapter
-from trading_bot.live.state import LiveState
+from trading_bot.live.state import LiveState, PositionState
 from trading_bot.risk import RiskManager
 from trading_bot.strategy import create_strategy
+from trading_bot.strategy.base import Signal, SignalKind, Strategy
 
 FEE_RATE = 0.001
 SLIPPAGE_BPS = 5.0
@@ -610,6 +612,129 @@ class TestPauseSwitch:
         state = LiveState.load(cfg.state_path)
         assert state.position is None
         assert state.trades[-1]["reason"] == "stop loss"
+
+
+class TestReconcile:
+    """reconcile: по количеству доверяем бирже; чужие монеты — needs_attention."""
+
+    ENTRY_TS = pd.Timestamp(BASE_MS, unit="ms", tz="UTC")
+
+    def _runner_with_position(self, tmp_path, free_base: float):
+        cfg = make_config(tmp_path)
+        fake = PrivateCcxt(donchian_rows(FLAT), free_base=free_base)
+        adapter = _TestnetAdapter(build_client(fake), cfg.symbol)
+        runner = build_runner(cfg, fake, adapter=adapter)
+        runner.state.position = PositionState(
+            quantity=1.0,
+            entry_price=100.0,
+            entry_ts=self.ENTRY_TS.isoformat(),
+            entry_reason="test entry",
+        )
+        runner.state.save(cfg.state_path)
+        return runner, cfg
+
+    def test_matching_position_is_left_alone(self, tmp_path) -> None:
+        runner, cfg = self._runner_with_position(tmp_path, free_base=1.0)
+
+        runner.reconcile()
+
+        state = LiveState.load(cfg.state_path)
+        assert state.position.quantity == pytest.approx(1.0)
+        assert state.needs_attention is False
+
+    def test_mismatch_trusts_the_exchange_and_saves(self, tmp_path) -> None:
+        runner, cfg = self._runner_with_position(tmp_path, free_base=0.5)
+
+        runner.reconcile()
+
+        state = LiveState.load(cfg.state_path)
+        assert state.position.quantity == pytest.approx(0.5)
+        assert state.needs_attention is False
+
+    def test_exchange_coins_without_state_position_raise_attention(self, tmp_path) -> None:
+        cfg = make_config(tmp_path)
+        fake = PrivateCcxt(donchian_rows(FLAT), free_base=2.0)
+        adapter = _TestnetAdapter(build_client(fake), cfg.symbol)
+        runner = build_runner(cfg, fake, adapter=adapter)
+
+        runner.reconcile()
+
+        state = LiveState.load(cfg.state_path)
+        assert state.needs_attention is True
+        assert "without a state position" in state.attention_reason
+
+
+class TakeProfitStrategy(Strategy):
+    """Тестовая стратегия для TP-parity: один вход с тейком close + дистанция."""
+
+    name = "tp_only"
+
+    def __init__(self, tp_distance: float = 10.0) -> None:
+        self.tp_distance = tp_distance
+
+    @property
+    def warmup_period(self) -> int:
+        return len(FLAT)
+
+    def on_candle(self, candles) -> list[Signal]:
+        if len(candles) == len(FLAT) + 1:
+            close = float(candles["close"].iloc[-1])
+            return [
+                Signal(
+                    SignalKind.LONG_ENTRY,
+                    reason="tp entry",
+                    take_profit=close + self.tp_distance,
+                )
+            ]
+        return []
+
+
+class TestTakeProfitParity:
+    """TP-parity: live-тейк совпадает с бэктест-движком на том же сценарии."""
+
+    def test_live_take_profit_exit_matches_backtest_engine(self, tmp_path) -> None:
+        closes = [*FLAT, 120.0, 119.0, 131.0]
+
+        engine = BacktestEngine(
+            strategy=TakeProfitStrategy(tp_distance=10.0),
+            risk=RiskManager(position_size_pct=0.95, quantity_precision=6, min_notional=5.0),
+            broker=SimulatedBroker(fee_rate=FEE_RATE, slippage_bps=SLIPPAGE_BPS),
+            start_cash=START_CASH,
+        )
+        result = engine.run(rows_to_df(donchian_rows(closes)))
+        engine_tps = result.trades[result.trades["reason_exit"] == "take profit"]
+        assert len(engine_tps) == 1
+        engine_exit_price = float(engine_tps["exit_price"].iloc[0])
+        engine_entry_price = float(result.trades["entry_price"].iloc[0])
+
+        # Live: тикер входа = open свечи после сигнальной (120.0, как в движке),
+        # тикер выхода = активный тейк-профит (движок исполняет по уровню).
+        cfg = make_config(tmp_path)
+        fake = FakeCcxt(donchian_rows(FLAT), ticker_price=120.0)
+        runner = build_runner(cfg, fake, strategy=TakeProfitStrategy(tp_distance=10.0))
+        runner.run_once()
+        append_candle(fake, [*FLAT, 120.0])
+        fake.ticker_price = 120.0
+        runner.run_once()
+
+        live_tp = LiveState.load(cfg.state_path).active_tp
+
+        append_candle(fake, [*FLAT, 120.0, 119.0])
+        fake.ticker_price = 119.0
+        runner.run_once()
+        append_candle(fake, [*FLAT, 120.0, 119.0, 131.0])
+        fake.ticker_price = live_tp  # пробой тейка тикером
+        runner.run_once()
+
+        state = LiveState.load(cfg.state_path)
+        assert state.position is None
+        assert state.trades[-1]["reason"] == "take profit"
+        live_exit_price = state.trades[-1]["price"]
+
+        # Тейк переякорен на фактическую цену входа той же функцией, что в
+        # движке, и исполняется по тому же уровню.
+        assert live_tp == pytest.approx(engine_entry_price + 10.0)
+        assert live_exit_price == pytest.approx(engine_exit_price)
 
 
 def build_client(fake):

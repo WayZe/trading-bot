@@ -106,11 +106,13 @@ class PrivateCcxt(FakeCcxt):
         ticker_price=100.0,
         order_status: dict | None = None,
         free_usdt: float = 0.0,
+        free_base: float = 0.0,
         fetch_order_exc: Exception | None = None,
     ) -> None:
         super().__init__(rows, ticker_price)
         self.order_status = order_status or {}
         self.free_usdt = free_usdt
+        self.free_base = free_base
         self.fetch_order_exc = fetch_order_exc
         self.created_orders: list[tuple] = []
 
@@ -124,7 +126,7 @@ class PrivateCcxt(FakeCcxt):
         return {"id": order_id, "status": "closed", **self.order_status}
 
     def fetch_balance(self) -> dict:
-        return {"free": {"USDT": self.free_usdt}}
+        return {"free": {"USDT": self.free_usdt, "BTC": self.free_base}}
 
 
 def make_config(tmp_path, **overrides) -> LiveConfig:
@@ -145,13 +147,19 @@ def make_config(tmp_path, **overrides) -> LiveConfig:
     return LiveConfig.model_validate({**base, **overrides})
 
 
-def build_runner(cfg: LiveConfig, fake, adapter=None) -> LiveRunner:
-    """Собрать раннер поверх подмены биржи (state читается с диска, как при рестарте)."""
+def build_runner(cfg: LiveConfig, fake, adapter=None, strategy=None) -> LiveRunner:
+    """Собрать раннер поверх подмены биржи (state читается с диска, как при рестарте).
+
+    ``strategy`` позволяет подставить готовый экземпляр (напр. кастомную
+    стратегию для parity-тестов); по умолчанию стратегия создаётся из реестра
+    по имени в конфиге.
+    """
     client = ExchangeClient()
     client.exchange = fake
     storage = CandleStorage(cfg.data_root)
     state = load_or_fresh_state(cfg.state_path, cfg)
-    strategy = create_strategy(cfg.strategy, cfg.strategy_params)
+    if strategy is None:
+        strategy = create_strategy(cfg.strategy, cfg.strategy_params)
     if adapter is None:
         broker = SimulatedBroker(fee_rate=cfg.fee_rate, slippage_bps=cfg.slippage_bps)
         adapter = PaperAdapter(
