@@ -27,6 +27,8 @@ CLI (`uv run trading-bot ...`):
 - `sweep --config ... --param fast=10,15,20 --param slow=30,50` — перебор сетки параметров.
 - `walkforward --config ... --param ... --is-days 180 --oos-days 60 --mode rolling --objective sharpe`
   — walk-forward валидация (IS→OOS окна, stitched-кривая).
+- `live --config config/live.yaml [--dry-run] [--once]` — live/paper-раннер:
+  `--dry-run` форсирует paper (без ключей), `--once` — один цикл (cron/smoke).
 
 Make-цели (см. Makefile): `make sync`, `make test`, `make lint`, `make download`,
 `make backtest`, `make report`, `make sweep`, `make walkforward`, `make smoke`,
@@ -70,6 +72,20 @@ Make-цели (см. Makefile): `make sync`, `make test`, `make lint`, `make dow
 - `research/` — исследования: `sweep.py` (разворот сетки, срез периода, строки
   с ошибками вместо падений) и `walkforward.py` (планировщик IS→OOS окон,
   lead-in из `warmup_period`, stitched-кривая).
+- `live/` — live/paper-раннер (шаг 2 роадмапа):
+  - `state.py` — персистентное состояние (`data/live/state.json`, атомарная
+    запись): позиция, активные стопы, последняя обработанная свеча, equity
+    paper, сделки; битый JSON — явная ошибка, не молчаливая перезапись;
+  - `execution.py` — адаптеры исполнения: `PaperAdapter` (тикер +
+    `SimulatedBroker`, ноль приватных API) и `TestnetAdapter` (market-ордера
+    на testnet, фактическая цена/комиссия из статуса ордера);
+  - `runner.py` — цикл: защита позиции по тикеру (стоп/тейк), догрузка
+    закрытых свечей через `HistoryDownloader` (чистый state → полный бэктест
+    с 2023-01-01, только прогрев), сигналы → ордера с переякориванием стопов
+    (`engine/stops.py`), persist после каждой свечи, kill-switch,
+    `needs_attention`, reconcile с балансом биржи в testnet;
+  - `ExchangeClient` без ключей — только публичные данные; ключи (только env:
+    `BYBIT_API_KEY`/`BYBIT_API_SECRET`) включают приватные методы и sandbox.
 - `cli.py` — команды typer + сохранение артефактов (`reports/last_run`,
   `reports/sweep/last`, `reports/walkforward/last`).
 
@@ -83,6 +99,23 @@ Make-цели (см. Makefile): `make sync`, `make test`, `make lint`, `make dow
 - **Движок — единственный владелец SL/TP**: уровни приходят в `Signal` как
   дистанции от close сигнальной свечи и переякориваются на фактическую цену
   исполнения; стратегия не имеет своего пути выхода по пробою стопа.
+- **Live-режим (дополнения к инвариантам выше)**:
+  - **paper/dry-run — ни одного приватного вызова биржи и ни одного
+    API-ключа**: публичные market data можно, `create_order`/`fetch_balance`
+    и прочее — нельзя (тест подменяет биржу фейком, где приватные методы
+    роняют тест);
+  - **ключи биржи — только из env** (`BYBIT_API_KEY`/`BYBIT_API_SECRET`),
+    никогда не в конфигах, git и логах;
+  - **kill-switch запрещает любые новые ордера** (файл `data/live/STOP`),
+    включая защитные выходы; цикл при этом продолжает обрабатывать тикеры
+    и свечи;
+  - live-стопы переякоряются только функциями `engine/stops.py` — теми же,
+    что в движке (parity-тест live vs backtest следит за совпадением);
+  - сигналы исполняются только по **закрытым** свечам; первая догрузка
+    истории при чистом state — только прогрев, торговля по устаревшим
+    сигналам запрещена;
+  - битое/чужое состояние (`state.json`) — явная ошибка при старте, не
+    молчаливый сброс.
 - **Рантайм-строки — на английском**: reason-строки сделок (`"sma cross up"`,
   `"stop loss"`, ...), тексты `ValueError`/логов, CLI help в `Annotated[...]`.
   Они хранятся в trades.csv/results.csv и проверяются тестами через
