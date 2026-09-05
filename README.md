@@ -161,7 +161,8 @@ src/trading_bot/
   engine/          бэктест: broker (комиссия+проскальзывание), portfolio
                    (кэш, позиция, TradeRecord), backtest (event loop)
   strategy/        плагины стратегий: base (Signal/Fill/Strategy ABC),
-                   sma_cross, реестр по имени
+                   sma_cross, trend_filter (TrendFiltered, композит),
+                   реестр по имени (класс или фабрика)
   research/        слой исследований: sweep по сетке параметров,
                    walk-forward валидация (IS→OOS окна, stitched-кривая)
   report/          метрики прогона (metrics.py) и графики (plots.py)
@@ -170,6 +171,44 @@ src/trading_bot/
 Стратегия не знает, кто её вызывает — бэктест-движок или будущий live-движок;
 исполнение полностью принадлежит engine и его broker. Подробности — в
 [спецификации](docs/superpowers/specs/2026-09-05-trading-bot-design.md).
+
+## Тренд-фильтр: `sma_cross_trend`
+
+Помимо базовых стратегий в реестре есть **композитная** — стратегия внутри
+тренд-фильтра. Обёртка `TrendFiltered` (`strategy/trend_filter.py`) пропускает
+сигналы внутренней стратегии через гейт: вход (`LONG_ENTRY`) разрешён, только
+если close последней закрытой свечи **строго выше** `sma(close, trend_period)`.
+Выходы (`LONG_EXIT`) и приложенные к сигналам стопы/тейки не фильтруются —
+выходить из позиции в медвежьем тренде легитимно, а уровни стопов по-прежнему
+принадлежат движку. Пока трендовая SMA в прогреве (свечей меньше
+`trend_period`), входы тоже запрещены. `warmup_period` обёртки — максимум из
+прогрева внутренней стратегии и `trend_period`.
+
+В реестре зарегистрирована фабрика `sma_cross_trend`: параметры
+`fast`/`slow`/`atr_period`/`atr_mult` уходят в `SmaCrossStrategy`, остальные
+(`trend_period`, `trend_source`) — в обёртку:
+
+```yaml
+# config/backtest.yaml
+strategy: sma_cross_trend
+strategy_params:
+  fast: 20
+  slow: 50
+  atr_period: 14
+  atr_mult: 2.0
+  trend_period: 200   # период трендовой SMA-фильтра
+```
+
+Работает во всех командах (`backtest`, `sweep`, `walkforward`) без изменений
+кода — параметры фильтра можно перебирать той же сеткой:
+`--param trend_period=100,200`. Готовые исследовательские конфиги:
+`config/research.yaml` (базовый) и `config/research_trend.yaml` (с фильтром).
+
+Помогает ли фильтр — решает исследование, а не интуиция: прогон
+walk-forward по BTC/ETH/SOL с предрегистрацией сетки и критерия успеха —
+в [docs/research/2026-09-05-trend-filter-wf.md](docs/research/2026-09-05-trend-filter-wf.md).
+Спойлер: по сшитой OOS-доходности фильтрованный вариант уступил базовому на
+всех трёх символах.
 
 ## Как добавить свою стратегию
 
@@ -203,14 +242,16 @@ class MomentumStrategy(Strategy):
         return []
 ```
 
-Зарегистрируйте класс в реестре:
+Зарегистрируйте её в реестре — записью может быть класс стратегии или
+фабрика-функция (как у композитной `sma_cross_trend`):
 
 ```python
 # src/trading_bot/strategy/__init__.py
 from trading_bot.strategy.momentum import MomentumStrategy
 
-STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
+STRATEGY_REGISTRY: dict[str, StrategyFactory] = {
     "sma_cross": SmaCrossStrategy,
+    "sma_cross_trend": _create_sma_cross_trend,  # фабрика-функция
     "momentum": MomentumStrategy,  # новая стратегия
 }
 ```

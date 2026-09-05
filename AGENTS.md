@@ -13,7 +13,7 @@
 
 ```bash
 uv sync                      # установить зависимости (Python 3.12+)
-uv run pytest                # тесты (280, офлайн — сеть не нужна)
+uv run pytest                # тесты (офлайн — сеть не нужна)
 uv run ruff check .          # линтер
 ```
 
@@ -48,9 +48,13 @@ Make-цели (см. Makefile): `make sync`, `make test`, `make lint`, `make dow
 - `strategy/` — плагины стратегий:
   - `base.py` — контракт: `Strategy` c `on_candle(candles[:i+1]) -> list[Signal]`,
     `on_fill`, `reset`, `warmup_period`; данные-классы `Signal`/`Fill`;
-  - реестр `STRATEGY_REGISTRY` в `strategy/__init__.py`, фабрика `create_strategy(name, params)`;
+  - реестр `STRATEGY_REGISTRY` в `strategy/__init__.py` (запись — класс
+    стратегии или фабрика-функция, напр. `sma_cross_trend`), фабрика
+    `create_strategy(name, params)`;
   - новая стратегия: класс от `Strategy`, регистрация в реестре, параметры —
-    в `strategy_params` конфига (yaml). Пример в README.
+    в `strategy_params` конфига (yaml). Пример в README. Композитные
+    стратегии — обёрткой над внутренней (`trend_filter.py: TrendFiltered`
+    гейтит только `LONG_ENTRY` по SMA-тренду, выходы не фильтруются).
 - `engine/` — бэктест:
   - `broker.py` — симуляция исполнения: комиссия `fee_rate` за сторону,
     проскальзывание `slippage_bps` против нас;
