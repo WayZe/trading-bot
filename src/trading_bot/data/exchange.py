@@ -13,14 +13,30 @@ _TIMEFRAME_UNITS_MS: dict[str, int] = {
 
 
 class ExchangeClient:
-    """Минимальная обёртка над ``ccxt.bybit``, ограниченная публичным доступом к OHLCV.
+    """Обёртка над ``ccxt.bybit``: публичные рыночные данные + опциональная торговля.
 
-    Используются только публичные рыночные данные, поэтому API-ключи не нужны.
+    Без ключей клиент работает только с публичным API (OHLCV, тикер) — этого
+    достаточно и downloader'у, и paper-режиму live-раннера. Ключи передаются
+    явно (live-CLI берёт их из переменных окружения, никогда не из конфига и
+    не из git) и включают приватные методы: размещение ордеров, их статус и
+    баланс. ``sandbox=True`` переключает ccxt на testnet-эндпоинт Bybit.
     Ограничение частоты запросов делегировано ccxt через ``enableRateLimit``.
     """
 
-    def __init__(self) -> None:
-        self.exchange = ccxt.bybit({"enableRateLimit": True})
+    def __init__(
+        self,
+        api_key: str | None = None,
+        secret: str | None = None,
+        sandbox: bool = False,
+    ) -> None:
+        params: dict = {"enableRateLimit": True}
+        if api_key and secret:
+            params["apiKey"] = api_key
+            params["secret"] = secret
+            params["options"] = {"defaultType": "spot"}
+        self.exchange = ccxt.bybit(params)
+        if sandbox:
+            self.exchange.set_sandbox_mode(True)
 
     def fetch_ohlcv(
         self,
@@ -43,6 +59,36 @@ class ExchangeClient:
         return self.exchange.fetch_ohlcv(
             symbol, timeframe=timeframe, since=since_ms, limit=limit
         )
+
+    def fetch_ticker_last(self, symbol: str) -> float:
+        """Получить последнюю цену тикера (публичный API).
+
+        Raises:
+            ValueError: если биржа не вернула цену ``last``.
+        """
+        ticker = self.exchange.fetch_ticker(symbol)
+        last = ticker.get("last") if ticker else None
+        if last is None:
+            raise ValueError(f"ticker for {symbol} has no 'last' price")
+        return float(last)
+
+    def create_market_order(self, symbol: str, side: str, quantity: float) -> dict:
+        """Разместить рыночный ордер (приватный API, только testnet-режим).
+
+        Raises:
+            ccxt.ExchangeError: если биржа отклонила ордер.
+        """
+        return self.exchange.create_order(symbol, "market", side, quantity)
+
+    def fetch_order(self, order_id: str, symbol: str) -> dict:
+        """Получить статус ордера (приватный API): средняя цена, объём, комиссия."""
+        return self.exchange.fetch_order(order_id, symbol)
+
+    def fetch_free_balance(self, currency: str = "USDT") -> float:
+        """Получить свободный баланс валюты (приватный API)."""
+        balance = self.exchange.fetch_balance()
+        free = balance.get("free") or {}
+        return float(free.get(currency, 0.0))
 
 
 def timeframe_to_ms(timeframe: str) -> int:

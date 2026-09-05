@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from trading_bot.config import BacktestConfig, load_config
+from trading_bot.config import BacktestConfig, LiveConfig, load_config, load_live_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -140,3 +140,69 @@ class TestBacktestConfig:
     def test_timeframe_above_one_day_raises(self) -> None:
         with pytest.raises(ValidationError, match="must not exceed 1d"):
             BacktestConfig(start="2024-01-01", timeframe="2d")
+
+
+def write_live_config(tmp_path: Path, content: str) -> Path:
+    path = tmp_path / "live.yaml"
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+class TestLiveConfig:
+    def test_defaults_are_paper_donchian_trend(self) -> None:
+        cfg = LiveConfig()
+
+        assert cfg.symbol == "BTC/USDT"
+        assert cfg.timeframe == "4h"
+        assert cfg.strategy == "donchian_trend"
+        assert cfg.strategy_params == {
+            "entry_period": 40,
+            "exit_period": 10,
+            "atr_period": 14,
+            "atr_mult": 2.0,
+            "trend_period": 100,
+        }
+        assert cfg.mode == "paper"
+        assert cfg.poll_seconds == 60
+        assert cfg.fee_rate == 0.001
+        assert cfg.slippage_bps == 5.0
+        assert cfg.position_size_pct == 0.95
+        assert cfg.start_cash == 10_000.0
+        assert cfg.quantity_precision == 6
+        assert cfg.min_notional == 5.0
+        assert cfg.data_root == "data/live"
+        assert cfg.state_path == "data/live/state.json"
+        assert cfg.kill_switch_path == "data/live/STOP"
+        assert cfg.log_file == "logs/live.log"
+
+    def test_shipped_live_config_loads(self) -> None:
+        cfg = load_live_config(PROJECT_ROOT / "config" / "live.yaml")
+
+        assert cfg.mode == "paper"
+        assert cfg.strategy == "donchian_trend"
+        assert cfg.strategy_params["entry_period"] == 40
+        assert cfg.strategy_params["trend_period"] == 100
+
+    def test_testnet_mode_passes(self) -> None:
+        assert LiveConfig(mode="testnet").mode == "testnet"
+
+    def test_unknown_mode_raises(self) -> None:
+        with pytest.raises(ValidationError, match="mode"):
+            LiveConfig(mode="real")
+
+    def test_bad_timeframe_raises(self) -> None:
+        with pytest.raises(ValidationError, match="timeframe"):
+            LiveConfig(timeframe="4H")
+
+    def test_bad_symbol_raises(self) -> None:
+        for symbol in ("BTCUSDT", "BTC", "/USDT", "BTC/"):
+            with pytest.raises(ValidationError, match="symbol"):
+                LiveConfig(symbol=symbol)
+
+    def test_nonpositive_poll_seconds_raises(self) -> None:
+        with pytest.raises(ValidationError):
+            LiveConfig(poll_seconds=0)
+
+    def test_empty_strategy_name_raises(self) -> None:
+        with pytest.raises(ValidationError, match="strategy"):
+            LiveConfig(strategy="  ")
