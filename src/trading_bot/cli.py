@@ -27,6 +27,7 @@ from trading_bot.report import (
     compute_metrics,
 )
 from trading_bot.report.plots import plot_equity, plot_trades
+from trading_bot.research import run_sweep, slice_candles
 from trading_bot.risk import RiskManager
 from trading_bot.strategy import create_strategy
 
@@ -37,6 +38,7 @@ app = typer.Typer(help="Educational crypto trading bot (Bybit spot, backtest-fir
 DATA_ROOT = Path("data")
 REPORTS_DIR = Path("reports")
 LAST_RUN_DIR = REPORTS_DIR / "last_run"
+SWEEP_DIR = REPORTS_DIR / "sweep" / "last"
 
 RUN_FILES = ("equity.parquet", "trades.csv", "meta.json")
 
@@ -108,25 +110,7 @@ def backtest(
 ) -> None:
     """Run a backtest over stored candles and save run artifacts."""
     cfg = load_config(config)
-
-    storage = CandleStorage(DATA_ROOT)
-    candles = storage.load(EXCHANGE_ID, cfg.symbol, cfg.timeframe)
-    if candles is None:
-        path = storage.path_for(EXCHANGE_ID, cfg.symbol, cfg.timeframe)
-        typer.echo(
-            f"Нет данных: {path} не найден.\n"
-            f"Сначала скачай историю: trading-bot download "
-            f"--symbol {cfg.symbol} --timeframe {cfg.timeframe} --since <YYYY-MM-DD>"
-        )
-        raise typer.Exit(code=1)
-
-    candles = _slice_candles(candles, cfg)
-    if candles.empty:
-        typer.echo(
-            f"В данных {cfg.symbol} {cfg.timeframe} нет свечей за период "
-            f"{cfg.start} .. {cfg.end or 'конец'}."
-        )
-        raise typer.Exit(code=1)
+    candles = _load_candles_for_period(cfg)
 
     try:
         strategy = create_strategy(cfg.strategy, cfg.strategy_params)
@@ -156,20 +140,202 @@ def backtest(
     _save_artifacts(result, benchmark, cfg, summary)
 
 
-def _slice_candles(candles: pd.DataFrame, cfg: BacktestConfig) -> pd.DataFrame:
-    """Keep candles with start <= timestamp < end (dates from the config)."""
-    ts = candles["timestamp"]
-    start_ts = pd.Timestamp(cfg.start, tz="UTC")
-    if ts.iloc[0] > start_ts:
-        logger.warning(
-            "данные начинаются с %s, позже запрошенного start=%s",
-            ts.iloc[0],
-            cfg.start,
+def _load_candles_for_period(cfg: BacktestConfig) -> pd.DataFrame:
+    """Load candles for the config symbol/timeframe sliced to the period.
+
+    Exits with a user-facing hint when the dataset is missing or the period
+    is empty. Shared by the ``backtest`` and ``sweep`` commands.
+    """
+    storage = CandleStorage(DATA_ROOT)
+    candles = storage.load(EXCHANGE_ID, cfg.symbol, cfg.timeframe)
+    if candles is None:
+        path = storage.path_for(EXCHANGE_ID, cfg.symbol, cfg.timeframe)
+        typer.echo(
+            f"Нет данных: {path} не найден.\n"
+            f"Сначала скачай историю: trading-bot download "
+            f"--symbol {cfg.symbol} --timeframe {cfg.timeframe} --since <YYYY-MM-DD>"
         )
-    mask = ts >= start_ts
-    if cfg.end is not None:
-        mask &= ts < pd.Timestamp(cfg.end, tz="UTC")
-    return candles.loc[mask].reset_index(drop=True)
+        raise typer.Exit(code=1)
+
+    sliced = slice_candles(candles, cfg)
+    if sliced.empty:
+        typer.echo(
+            f"В данных {cfg.symbol} {cfg.timeframe} нет свечей за период "
+            f"{cfg.start} .. {cfg.end or 'конец'}."
+        )
+        raise typer.Exit(code=1)
+    return sliced
+
+
+def _parse_grid(specs: list[str] | None) -> dict[str, list]:
+    """Parse repeated ``--param name=v1,v2,...`` options into a grid dict.
+
+    Values are coerced: int-like strings become ``int``, other numeric
+    strings become ``float``, anything else stays a string. The strategy
+    constructor validates the final types and values.
+    """
+    if not specs:
+        return {}
+    grid: dict[str, list] = {}
+    for spec in specs:
+        name, _, raw_values = spec.partition("=")
+        name = name.strip()
+        values = [item.strip() for item in raw_values.split(",") if item.strip()]
+        if not name or not values:
+            raise typer.BadParameter(f"--param expects 'name=v1,v2,...', got {spec!r}")
+        if name in grid:
+            raise typer.BadParameter(f"--param {name!r} задан дважды")
+        grid[name] = [_coerce_scalar(item) for item in values]
+    return grid
+
+
+def _coerce_scalar(raw: str) -> int | float | str:
+    """Coerce a grid value: int-like strings to int, numeric to float, else str."""
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        return float(raw)
+    except ValueError:
+        return raw
+
+
+@app.command()
+def sweep(
+    config: Annotated[
+        Path, typer.Option(help="Path to the backtest YAML config.")
+    ] = Path("config/backtest.yaml"),
+    param: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--param",
+            help="Параметр сетки 'name=v1,v2,...' (повторяемый): "
+            "--param fast=10,15,20 --param slow=30,50.",
+        ),
+    ] = None,
+) -> None:
+    """Прогнать бэктест по сетке параметров стратегии и свести результаты."""
+    cfg = load_config(config)
+    grid = _parse_grid(param)
+    if not grid:
+        typer.echo(
+            "Укажи хотя бы один параметр сетки: "
+            "--param fast=10,20,30 --param slow=50,100"
+        )
+        raise typer.Exit(code=1)
+
+    candles = _load_candles_for_period(cfg)
+
+    try:
+        results = run_sweep(cfg, grid, candles)
+    except ValueError as error:
+        typer.echo(f"Ошибка sweep: {error}")
+        raise typer.Exit(code=1) from error
+
+    _save_sweep_artifacts(cfg, grid, results)
+    _print_sweep(cfg, grid, results)
+
+
+def _save_sweep_artifacts(
+    cfg: BacktestConfig, grid: dict[str, list], results: pd.DataFrame
+) -> None:
+    """Write results.csv and meta.json (config + grid) to reports/sweep/last/."""
+    SWEEP_DIR.mkdir(parents=True, exist_ok=True)
+    results.to_csv(SWEEP_DIR / "results.csv", index=False)
+    meta = {
+        "config": cfg.model_dump(mode="json"),
+        "grid": grid,
+        "n_combinations": int(len(results)),
+    }
+    with (SWEEP_DIR / "meta.json").open("w", encoding="utf-8") as file:
+        json.dump(meta, file, ensure_ascii=False, indent=2)
+    typer.echo(f"Результаты: {SWEEP_DIR / 'results.csv'}")
+
+
+def _print_sweep(cfg: BacktestConfig, grid: dict[str, list], results: pd.DataFrame) -> None:
+    """Print the sweep results table and the best row by total return.
+
+    Grids with more than 20 rows show only the top-10 successful
+    combinations; failed combinations are always listed last with a
+    truncated error text.
+    """
+    table = Table(
+        title=f"Sweep: {cfg.strategy} · {cfg.symbol} · {cfg.timeframe} "
+        f"({len(results)} комбинаций)",
+        title_justify="left",
+    )
+    for name in grid:
+        table.add_column(name, justify="right", no_wrap=True)
+    table.add_column("Доходность", justify="right")
+    table.add_column("CAGR", justify="right")
+    table.add_column("Шарп", justify="right")
+    table.add_column("Макс. просадка", justify="right")
+    table.add_column("Сделок", justify="right")
+    table.add_column("Ошибка", no_wrap=True, max_width=48, overflow="fold")
+
+    valid = results[results["error"].isna()]
+    failed = results[results["error"].notna()]
+
+    shown = valid
+    note = None
+    if len(results) > 20 and not valid.empty:
+        shown = valid.nlargest(10, "total_return_pct")
+        note = (
+            f"(показаны топ-10 из {len(valid)}; "
+            f"полные результаты в {SWEEP_DIR / 'results.csv'})"
+        )
+    for _, row in shown.iterrows():
+        table.add_row(*(_sweep_cell(row, name) for name in grid),
+                      _sweep_cell(row, "total_return_pct"),
+                      _sweep_cell(row, "cagr_pct"),
+                      _sweep_cell(row, "sharpe"),
+                      _sweep_cell(row, "max_drawdown_pct"),
+                      _sweep_cell(row, "n_trades"),
+                      "")
+    for _, row in failed.iterrows():
+        table.add_row(*(_sweep_cell(row, name) for name in grid),
+                      *(_sweep_cell(row, col) for col in
+                        ("total_return_pct", "cagr_pct", "sharpe", "max_drawdown_pct", "n_trades")),
+                      str(row["error"]))
+
+    Console().print(table)
+    if note:
+        typer.echo(note)
+
+    if valid.empty:
+        typer.echo("Ни одна комбинация не выполнилась успешно — см. тексты ошибок выше.")
+        return
+    best = valid.loc[valid["total_return_pct"].idxmax()]
+    params_str = ", ".join(f"{name}={best[name]}" for name in grid)
+    typer.echo(
+        f"Лучшая комбинация: {params_str} — "
+        f"доходность {best['total_return_pct']:+.2f}%, "
+        f"CAGR {_fmt_opt(_opt(best['cagr_pct']), _fmt_pct)}, "
+        f"Шарп {_fmt_opt(_opt(best['sharpe']), lambda v: f'{v:.2f}')}, "
+        f"макс. просадка {best['max_drawdown_pct']:+.2f}%, "
+        f"итоговый капитал {_fmt_money(_opt(best['final_equity']))} USDT"
+    )
+
+
+def _opt(value) -> float | None:
+    """Convert a possibly-NaN sweep cell to ``float | None``."""
+    return None if pd.isna(value) else float(value)
+
+
+def _sweep_cell(row: pd.Series, name: str) -> str:
+    """Format one sweep table cell (NaN as an em dash, floats with 2 dp)."""
+    value = row[name]
+    if pd.isna(value):
+        return "—"
+    if name == "n_trades":
+        return str(int(value))
+    if isinstance(value, float):
+        if math.isinf(value):
+            return "∞"
+        sign = "+" if name in ("total_return_pct", "max_drawdown_pct") else ""
+        return f"{value:{sign}.2f}"
+    return str(value)
 
 
 def _summary(cfg: BacktestConfig, result: BacktestResult) -> dict:

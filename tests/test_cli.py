@@ -6,10 +6,11 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 from typer.testing import CliRunner
 
 from tests.conftest import make_candles, rows_to_df
-from trading_bot.cli import app
+from trading_bot.cli import _parse_grid, app
 from trading_bot.config import BacktestConfig
 from trading_bot.data.storage import CandleStorage
 
@@ -227,6 +228,104 @@ def test_backtest_with_missing_config_fails() -> None:
     result = runner.invoke(app, ["backtest", "--config", "/nonexistent/config.yaml"])
 
     assert result.exit_code != 0
+
+
+SWEEP_CONFIG = (
+    'start: "2025-07-01"\n'
+    "strategy: sma_cross\n"
+    "strategy_params:\n"
+    "  fast: 3\n"
+    "  slow: 6\n"
+    "  atr_period: 3\n"
+)
+
+
+class TestSweep:
+    def test_runs_and_writes_artifacts(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        _prepare_data(tmp_path, n_candles=120)
+        config = tmp_path / "backtest.yaml"
+        config.write_text(SWEEP_CONFIG, encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            ["sweep", "--config", str(config), "--param", "fast=3,4", "--param", "slow=6"],
+        )
+
+        assert result.exit_code == 0, result.output
+        sweep_dir = tmp_path / "reports" / "sweep" / "last"
+        results = pd.read_csv(sweep_dir / "results.csv")
+        assert len(results) == 2
+        assert set(results["fast"]) == {3, 4}
+        assert "total_return_pct" in results.columns
+        assert "error" in results.columns
+        meta = json.loads((sweep_dir / "meta.json").read_text(encoding="utf-8"))
+        assert meta["grid"] == {"fast": [3, 4], "slow": [6]}
+        assert meta["n_combinations"] == 2
+        assert meta["config"]["symbol"] == "BTC/USDT"
+        assert "Лучшая комбинация" in result.output
+        assert "Доходность" in result.output
+
+    def test_invalid_combo_is_reported_not_fatal(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        _prepare_data(tmp_path, n_candles=120)
+        config = tmp_path / "backtest.yaml"
+        config.write_text(SWEEP_CONFIG, encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            ["sweep", "--config", str(config), "--param", "fast=3,10", "--param", "slow=6"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "must be smaller than slow" in result.output
+
+    def test_without_param_fails_with_hint(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        _prepare_data(tmp_path)
+        config = tmp_path / "backtest.yaml"
+        config.write_text(SWEEP_CONFIG, encoding="utf-8")
+
+        result = runner.invoke(app, ["sweep", "--config", str(config)])
+
+        assert result.exit_code == 1
+        assert "--param" in result.output
+
+    def test_without_data_fails_with_download_hint(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        config = tmp_path / "backtest.yaml"
+        config.write_text(SWEEP_CONFIG, encoding="utf-8")
+
+        result = runner.invoke(app, ["sweep", "--config", str(config), "--param", "fast=3"])
+
+        assert result.exit_code == 1
+        assert "download" in result.output
+
+    def test_bad_param_spec_fails(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        _prepare_data(tmp_path)
+        config = tmp_path / "backtest.yaml"
+        config.write_text(SWEEP_CONFIG, encoding="utf-8")
+
+        result = runner.invoke(app, ["sweep", "--config", str(config), "--param", "fast"])
+
+        assert result.exit_code != 0
+        assert "name=v1,v2,..." in result.output
+
+
+class TestParseGrid:
+    def test_coerces_int_float_and_str(self) -> None:
+        assert _parse_grid(["fast=10,20", "atr_mult=1.5,2", "mode=agg"]) == {
+            "fast": [10, 20],
+            "atr_mult": [1.5, 2.0],
+            "mode": ["agg"],
+        }
+
+    def test_duplicate_param_fails(self) -> None:
+        from typer import BadParameter
+
+        with pytest.raises(BadParameter):
+            _parse_grid(["fast=1", "fast=2"])
 
 
 class TestDownloadSince:
