@@ -12,6 +12,7 @@ from trading_bot.config import BacktestConfig
 from trading_bot.data.exchange import timeframe_to_ms
 from trading_bot.engine.backtest import build_engine
 from trading_bot.research import plan_windows, run_walkforward
+from trading_bot.research import walkforward as walkforward_module
 from trading_bot.research.sweep import run_sweep
 from trading_bot.strategy import create_strategy
 
@@ -241,6 +242,63 @@ class TestRunWalkforward:
         assert wf.windows[0].oos_return_pct is None
         assert wf.stitched_equity.empty
         assert wf.trades.empty
+
+    def test_data_gap_in_is_window_fails_only_that_window(self) -> None:
+        candles = make_cyclic_candles()  # 80 days -> 4 rolling 10+10 windows
+        # drop the IS span of window 1 (days 20..30): a hole in the data
+        ts = candles["timestamp"]
+        start = ts.iloc[0]
+        hole = candles.loc[
+            (ts >= start + 20 * DAY) & (ts < start + 30 * DAY)
+        ].index
+        candles = candles.drop(hole).reset_index(drop=True)
+
+        wf = run_walkforward(
+            candles,
+            make_config(),
+            {"fast": [3], "slow": [6]},
+            is_days=10,
+            oos_days=10,
+        )
+
+        assert len(wf.windows) == 4
+        assert wf.windows[1].error == "no candles in IS window"
+        assert wf.windows[1].best_params is None
+        assert wf.windows[1].oos_return_pct is None
+        # every other window still ran to completion
+        assert all(w.error is None for i, w in enumerate(wf.windows) if i != 1)
+        assert all(w.oos_return_pct is not None for i, w in enumerate(wf.windows) if i != 1)
+        assert not wf.stitched_equity.empty
+
+    def test_is_sweep_value_error_fails_only_that_window(self, monkeypatch) -> None:
+        candles = make_cyclic_candles()
+        cfg = make_config()
+        grid = {"fast": [3], "slow": [6]}
+        # plan once to learn the window whose IS sweep will blow up
+        planned = run_walkforward(candles, cfg, grid, is_days=10, oos_days=10)
+        hole = planned.windows[1]
+        real_run_sweep = run_sweep
+
+        def fake_run_sweep(config, grid_arg, candles_arg):
+            if config.start == hole.is_start.strftime("%Y-%m-%d %H:%M:%S"):
+                raise ValueError("boom IS")
+            return real_run_sweep(config, grid_arg, candles_arg)
+
+        monkeypatch.setattr(walkforward_module, "run_sweep", fake_run_sweep)
+
+        wf = run_walkforward(candles, cfg, grid, is_days=10, oos_days=10)
+
+        assert len(wf.windows) == 4
+        assert wf.windows[1].error == "boom IS"
+        assert wf.windows[1].oos_return_pct is None
+        assert all(w.error is None for i, w in enumerate(wf.windows) if i != 1)
+
+    def test_combination_cap_raises_instead_of_error_rows(self) -> None:
+        candles = make_cyclic_candles()  # planning fits, the cap check is up front
+        grid = {"fast": list(range(15)), "slow": list(range(15))}  # 225 > 200
+
+        with pytest.raises(ValueError, match="combinations"):
+            run_walkforward(candles, make_config(), grid, is_days=10, oos_days=10)
 
     def test_window_count_above_limit_raises(self) -> None:
         candles = make_cyclic_candles(1500)  # 250 days; planning only, no runs

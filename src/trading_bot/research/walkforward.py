@@ -7,14 +7,21 @@ followed by an out-of-sample (OOS) span. Per window:
 2. the best valid combination by ``objective`` is selected;
 3. that combination is run once over the OOS span, preceded by a *lead-in*
    of ``strategy.warmup_period`` candles so indicators warm up on data
-   before the OOS start;
+   before the OOS start (the engine starts every window with an empty
+   portfolio, so a position can only be *opened* during the lead-in);
 4. only the equity part at/after ``oos_start`` counts towards OOS metrics
-   and the stitched curve — PnL earned during the lead-in is discarded.
+   and the stitched curve — PnL earned before ``oos_start`` is discarded.
+   A trade opened during the lead-in but closed inside the OOS span still
+   contributes its OOS part to the equity/return, yet is excluded from the
+   trade metrics — hence a window can show a nonzero return with zero
+   recorded trades.
 
 The stitched curve is the concatenation of the per-window OOS equity parts,
 each normalized to its own first value and multiplied by the accumulated
 growth: an estimate of what the strategy would have returned with periodic
-re-optimization, free of look-ahead bias.
+re-optimization, free of look-ahead bias. The calendar gaps between windows
+become zero returns in ``pct_change``, which slightly distorts the
+annualized Sharpe of the stitched curve — a deliberate simplification.
 
 Pure functions over candles; all I/O (artifacts, plots) lives in the CLI.
 """
@@ -34,7 +41,7 @@ from trading_bot.data.exchange import timeframe_to_ms
 from trading_bot.engine.backtest import build_engine
 from trading_bot.engine.portfolio import TRADE_RECORD_FIELDS
 from trading_bot.report.metrics import compute_metrics
-from trading_bot.research.sweep import run_sweep
+from trading_bot.research.sweep import MAX_COMBINATIONS, run_sweep
 from trading_bot.strategy import create_strategy
 
 logger = logging.getLogger(__name__)
@@ -45,6 +52,23 @@ MAX_WINDOWS = 50
 
 MODES = ("rolling", "anchored")
 OBJECTIVES = ("sharpe", "total_return_pct")
+
+# Columns of a walk-forward results row (after the parameter columns):
+# grid parameter names that collide with these would corrupt results.csv,
+# so they are rejected at the ``--param`` validation point.
+WINDOW_COLUMNS = (
+    "is_start",
+    "is_end",
+    "oos_start",
+    "oos_end",
+    "mode",
+    "is_objective",
+    "oos_return_pct",
+    "oos_sharpe",
+    "oos_max_dd_pct",
+    "oos_trades",
+    "error",
+)
 
 _DAY = pd.Timedelta(days=1)
 
@@ -128,23 +152,7 @@ class WalkForwardResult:
                 error=window.error,
             )
             rows.append(row)
-        return pd.DataFrame(rows, columns=[*param_grid, *self._window_columns()])
-
-    @staticmethod
-    def _window_columns() -> list[str]:
-        return [
-            "is_start",
-            "is_end",
-            "oos_start",
-            "oos_end",
-            "mode",
-            "is_objective",
-            "oos_return_pct",
-            "oos_sharpe",
-            "oos_max_dd_pct",
-            "oos_trades",
-            "error",
-        ]
+        return pd.DataFrame(rows, columns=[*param_grid, *WINDOW_COLUMNS])
 
 
 def plan_windows(
@@ -241,24 +249,37 @@ def run_walkforward(
     """Run walk-forward analysis: per-window IS optimization -> OOS verification.
 
     Windows come from :func:`plan_windows` over the available candle range.
-    The IS sweep reuses :func:`run_sweep` (including its error-row and grid
-    cap semantics) via a period-adjusted copy of ``base_config``; the best
-    valid row by ``objective`` (NaN/None objective values are not rankable)
-    is then run once over the OOS span with a lead-in of
-    ``strategy.warmup_period`` candles before ``oos_start`` (fewer if the
-    data does not reach back that far). OOS metrics are computed on the
-    equity part at/after ``oos_start`` and trades entering at/after
-    ``oos_start``, so PnL earned during the lead-in is deliberately
-    discarded — the lead-in only warms up indicators and positions.
+    The IS sweep reuses :func:`run_sweep` (including its error-row semantics)
+    via a period-adjusted copy of ``base_config``; the best valid row by
+    ``objective`` (NaN/None objective values are not rankable) is then run
+    once over the OOS span with a lead-in of ``strategy.warmup_period``
+    candles before ``oos_start`` (fewer if the data does not reach back that
+    far). OOS metrics are computed on the equity part at/after ``oos_start``
+    and trades entering at/after ``oos_start``, so PnL earned before
+    ``oos_start`` is deliberately discarded; the engine starts each window
+    with an empty portfolio, so the lead-in can only open positions, and a
+    lead-in trade closed inside OOS contributes to the equity but not to
+    the trade metrics.
+
+    A window whose IS sweep fails (empty IS slice due to a data gap, invalid
+    candles, ...) becomes an error row; the remaining windows still run.
 
     Raises:
-        ValueError: if ``candles`` is empty, ``objective`` is unknown, or
-            window planning fails (see :func:`plan_windows`).
+        ValueError: if ``candles`` is empty, ``objective`` is unknown, the
+            grid exceeds :data:`~trading_bot.research.sweep.MAX_COMBINATIONS`
+            (the cap is the same for every window, so it is checked once up
+            front), or window planning fails (see :func:`plan_windows`).
     """
     if objective not in OBJECTIVES:
         raise ValueError(f"unknown objective {objective!r}; available: {', '.join(OBJECTIVES)}")
     if candles.empty:
         raise ValueError("no candles: the dataset is empty")
+    n_combinations = math.prod(len(values) for values in param_grid.values()) or 1
+    if n_combinations > MAX_COMBINATIONS:
+        raise ValueError(
+            f"parameter grid expands to {n_combinations} combinations, "
+            f"above the limit of {MAX_COMBINATIONS}; narrow the grid"
+        )
 
     step_delta = pd.Timedelta(milliseconds=timeframe_to_ms(base_config.timeframe))
     start_ts = pd.Timestamp(candles["timestamp"].iloc[0])
@@ -330,16 +351,28 @@ def _run_window(
         oos_end=window.oos_end,
         mode=mode,
     )
-    is_frame = run_sweep(
-        base_config.model_copy(
-            update={
-                "start": window.is_start.strftime("%Y-%m-%d %H:%M:%S"),
-                "end": window.is_end.strftime("%Y-%m-%d %H:%M:%S"),
-            }
-        ),
-        param_grid,
-        candles,
-    )
+    # Same slice run_sweep would build from the config period; checked here
+    # so a data gap (e.g. a missing chunk of history) fails only this window.
+    if _slice_range(candles, window.is_start, window.is_end).empty:
+        result.error = "no candles in IS window"
+        return result, None, None
+    try:
+        is_frame = run_sweep(
+            base_config.model_copy(
+                update={
+                    "start": window.is_start.strftime("%Y-%m-%d %H:%M:%S"),
+                    "end": window.is_end.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            ),
+            param_grid,
+            candles,
+        )
+    except ValueError as error:  # one bad IS window must not kill the run
+        # the combinations cap is checked up front in run_walkforward, so a
+        # cap ValueError can never reach this point
+        logger.debug("walk-forward window %s: IS sweep failed", window, exc_info=True)
+        result.error = str(error) or type(error).__name__
+        return result, None, None
     valid = is_frame[is_frame["error"].isna()]
     if valid.empty:
         result.error = "no valid combos in IS"

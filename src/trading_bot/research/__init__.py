@@ -8,6 +8,7 @@ from trading_bot.research.sweep import (
 )
 from trading_bot.research.walkforward import (
     MAX_WINDOWS,
+    WINDOW_COLUMNS,
     WalkForwardResult,
     Window,
     WindowResult,
@@ -18,6 +19,7 @@ from trading_bot.research.walkforward import (
 __all__ = [
     "MAX_COMBINATIONS",
     "MAX_WINDOWS",
+    "WINDOW_COLUMNS",
     "Window",
     "WindowResult",
     "WalkForwardResult",

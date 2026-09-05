@@ -27,6 +27,7 @@ from trading_bot.report import (
 )
 from trading_bot.report.plots import plot_equity, plot_stitched_equity, plot_trades
 from trading_bot.research import (
+    WINDOW_COLUMNS,
     WalkForwardResult,
     run_sweep,
     run_walkforward,
@@ -49,6 +50,9 @@ RUN_FILES = ("equity.parquet", "trades.csv", "meta.json")
 
 # Grid names that would collide with sweep result columns.
 _RESERVED_PARAM_NAMES = frozenset(METRIC_COLUMNS) | {"error"}
+# Walkforward results.csv also carries window columns; the walkforward
+# command rejects both sets (see WINDOW_COLUMNS in research.walkforward).
+_WALKFORWARD_RESERVED_PARAM_NAMES = _RESERVED_PARAM_NAMES | frozenset(WINDOW_COLUMNS)
 
 
 def _setup_logging() -> None:
@@ -208,13 +212,16 @@ def _load_candles_for_period(cfg: BacktestConfig) -> pd.DataFrame:
     return sliced
 
 
-def _parse_grid(specs: list[str] | None) -> dict[str, list]:
+def _parse_grid(
+    specs: list[str] | None, *, reserved: frozenset[str] = _RESERVED_PARAM_NAMES
+) -> dict[str, list]:
     """Parse repeated ``--param name=v1,v2,...`` options into a grid dict.
 
     Values are coerced: int-like strings become ``int``, other numeric
     strings become ``float``, anything else stays a string. The strategy
     constructor validates the final types and values. Names that collide
-    with sweep result columns (metrics and ``error``) are rejected.
+    with result columns (metrics and ``error``; for walkforward also the
+    window columns) are rejected via ``reserved``.
     """
     if not specs:
         return {}
@@ -227,9 +234,9 @@ def _parse_grid(specs: list[str] | None) -> dict[str, list]:
             raise typer.BadParameter(f"--param expects 'name=v1,v2,...', got {spec!r}")
         if name in grid:
             raise typer.BadParameter(f"--param {name!r} задан дважды")
-        if name in _RESERVED_PARAM_NAMES:
+        if name in reserved:
             raise typer.BadParameter(
-                f"--param {name!r} конфликтует с колонкой результата sweep; "
+                f"--param {name!r} конфликтует с колонкой результата; "
                 "выбери другое имя параметра"
             )
         grid[name] = [_coerce_scalar(item) for item in values]
@@ -442,7 +449,7 @@ def walkforward(
     в будущее.
     """
     cfg = _apply_overrides(load_config(config), symbol, timeframe)
-    grid = _parse_grid(param)
+    grid = _parse_grid(param, reserved=_WALKFORWARD_RESERVED_PARAM_NAMES)
     if not grid:
         typer.echo(
             "Укажи хотя бы один параметр сетки: "
@@ -483,6 +490,10 @@ def _save_walkforward_artifacts(
         wf.stitched_equity.to_frame().to_parquet(
             WALKFORWARD_DIR / "stitched_equity.parquet", engine="pyarrow"
         )
+    else:
+        # A fully failed run must not leave artifacts of the previous one behind.
+        for stale in ("stitched_equity.parquet", "walkforward.png"):
+            (WALKFORWARD_DIR / stale).unlink(missing_ok=True)
     typer.echo(f"Результаты: {WALKFORWARD_DIR / 'results.csv'}")
 
 
@@ -593,7 +604,9 @@ def _print_walkforward_summary(
     )
     typer.echo(
         "OOS-метрики считаются от первой свечи OOS-отрезка: lead-in перед окном "
-        "только разогревает индикаторы, его PnL отбрасывается."
+        "разогревает индикаторы (движок стартует с пустого портфеля), его PnL "
+        "до oos_start отбрасывается; сделка, открытая в lead-in и закрытая в OOS, "
+        "учитывается в кривой, но не в trade-метриках."
     )
 
     plot_stitched_equity(stitched, WALKFORWARD_DIR / "walkforward.png", benchmark=benchmark)

@@ -424,6 +424,15 @@ class TestParseGrid:
         with pytest.raises(BadParameter, match="колонкой результата"):
             _parse_grid([f"{name}=1"])
 
+    @pytest.mark.parametrize("name", ["mode", "is_start", "oos_return_pct", "oos_trades"])
+    def test_walkforward_window_column_names_fail(self, name: str) -> None:
+        from typer import BadParameter
+
+        from trading_bot.cli import _WALKFORWARD_RESERVED_PARAM_NAMES
+
+        with pytest.raises(BadParameter, match="колонкой результата"):
+            _parse_grid([f"{name}=1"], reserved=_WALKFORWARD_RESERVED_PARAM_NAMES)
+
 
 class TestSymbolTimeframeOverrides:
     ETH_CONFIG = 'start: "2025-07-01"\nsymbol: BTC/USDT\ntimeframe: 4h\n'
@@ -779,3 +788,58 @@ class TestWalkforward:
         assert (wf_dir / "meta.json").exists()
         assert not (wf_dir / "stitched_equity.parquet").exists()
         assert not (wf_dir / "walkforward.png").exists()
+
+    def test_failed_rerun_removes_stale_stitched_artifacts(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        _prepare_cyclic_data(tmp_path, n_candles=540)  # 90 days at 4h
+        config = tmp_path / "backtest.yaml"
+        config.write_text(SWEEP_CONFIG, encoding="utf-8")
+        argv = [
+            "walkforward",
+            "--config",
+            str(config),
+            "--is-days",
+            "10",
+            "--oos-days",
+            "10",
+        ]
+
+        ok_run = runner.invoke(app, [*argv, "--param", "fast=3,4", "--param", "slow=6"])
+        assert ok_run.exit_code == 0, ok_run.output
+        wf_dir = tmp_path / "reports" / "walkforward" / "last"
+        assert (wf_dir / "stitched_equity.parquet").exists()
+        assert (wf_dir / "walkforward.png").exists()
+
+        # same directory, now a fully failed run (all grid combos invalid)
+        failed_run = runner.invoke(app, [*argv, "--param", "fast=10,20", "--param", "slow=6"])
+        assert failed_run.exit_code == 0, failed_run.output
+
+        assert not (wf_dir / "stitched_equity.parquet").exists()
+        assert not (wf_dir / "walkforward.png").exists()
+        results = pd.read_csv(wf_dir / "results.csv")
+        assert results["error"].notna().all()
+
+    def test_window_column_param_name_fails_cleanly(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        _prepare_cyclic_data(tmp_path, n_candles=540)
+        config = tmp_path / "backtest.yaml"
+        config.write_text(SWEEP_CONFIG, encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            [
+                "walkforward",
+                "--config",
+                str(config),
+                "--param",
+                "mode=x",
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "колонкой результата" in result.output
+        assert "Traceback" not in result.output
