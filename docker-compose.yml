@@ -12,6 +12,11 @@ services:
       - ./data:/app/data        # state.json, выключатели STOP/PAUSE, свечи
       - ./logs:/app/logs        # ротируемый лог
       - ./config:/app/config    # live.yaml
+    environment:
+      # Ключи уведомлений — только через окружение (.env рядом с compose-файлом);
+      # пустые значения = уведомления выключены.
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
     logging:
       driver: json-file
       options:
