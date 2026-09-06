@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from trading_bot.config import BacktestConfig, LiveConfig, load_config, load_live_config
@@ -184,6 +185,19 @@ class TestLiveConfig:
         assert cfg.strategy_params["entry_period"] == 40
         assert cfg.strategy_params["trend_period"] == 100
         assert cfg.pause_switch_path == "data/live/PAUSE"
+
+    def test_shipped_live_config_has_no_telegram_secret_fields(self) -> None:
+        """Канарейка: в коммитимом config/live.yaml нет полей токена Telegram.
+
+        Файл трекается в git; токен и chat_id задаются ТОЛЬКО через окружение
+        (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID) или локальный non-git конфиг.
+        """
+        raw = yaml.safe_load(
+            (PROJECT_ROOT / "config" / "live.yaml").read_text(encoding="utf-8")
+        )
+
+        assert "telegram_bot_token" not in raw
+        assert "telegram_chat_id" not in raw
 
     def test_testnet_mode_passes(self) -> None:
         assert LiveConfig(mode="testnet").mode == "testnet"

@@ -26,6 +26,11 @@
 Уведомления Telegram (опционально, ``live/notify.py``): старт процесса,
 входы/выходы и защитные стоп/тейк, подъём ``needs_attention``, переходы
 STOP/PAUSE, троттлируемые сетевые сбои и суточный heartbeat-дайджест.
+Старт и heartbeat-дайджест осмыслены только в режиме постоянного процесса
+(``run_forever``): в однократном режиме (``--once``, cron) каждый запуск —
+«новый процесс», поэтому они отключены (иначе крон спамил бы «стартом», а
+таймер дайджеста между запусками всё равно не живёт). Остальные события —
+сделки, свитчи, сбои, ``needs_attention`` — работают в обоих режимах.
 Сбой отправки никогда не рвёт торговый цикл: ``Notifier.send`` глотает
 любые исключения сам (токен при этом не попадает в лог).
 
@@ -100,6 +105,11 @@ class LiveRunner:
         notifier: отправитель Telegram-уведомлений; ``None`` — заглушка
             :class:`NullNotifier` (цикл работает как раньше, ничего не шлёт).
             Сбой отправки не рвёт торговый цикл: ``send`` глотает всё сам.
+        once: признак однократного запуска (CLI ``--once``, cron-эксплуатация).
+            Отключает стартовое сообщение и heartbeat-дайджест: каждый запуск
+            крона — «новый процесс», без этого флага он каждый раз слал бы
+            critical «Раннер запущен», а дайджест никогда бы не уходил.
+            Сделки, свитчи, сбои и ``needs_attention`` уведомляются как раньше.
     """
 
     def __init__(
@@ -111,6 +121,7 @@ class LiveRunner:
         exchange_client: object,
         storage: CandleStorage,
         notifier: Notifier | None = None,
+        once: bool = False,
     ) -> None:
         self.config = config
         self.state = state
@@ -119,6 +130,7 @@ class LiveRunner:
         self.exchange_client = exchange_client
         self.storage = storage
         self.notifier = notifier if notifier is not None else NullNotifier()
+        self.once = once
         # Память уведомлений: старт (один раз за процесс), предыдущие состояния
         # свитчей (первый цикл — начальное состояние, без уведомлений), флаг
         # attention (рестарт с уже поднятым флагом не спамит повторно) и таймер
@@ -141,10 +153,13 @@ class LiveRunner:
 
         Сетевые ошибки логируются как warning (цикл повторится на следующем
         тике), любые другие исключения — как error с traceback; раннер
-        никогда не падает из-за одной неудачи. Уведомления: сообщение о
-        старте процесса — один раз на первом цикле; сетевой сбой — в
-        Telegram (категория ``error``, троттлинг); поднятый за цикл флаг
-        ``needs_attention`` — критическое сообщение (только сам переход).
+        никогда не падает из-за одной неудачи. Уведомления: сетевой сбой и
+        неожиданная ошибка цикла — в Telegram (категория ``error``,
+        троттлинг); поднятый за цикл флаг ``needs_attention`` — критическое
+        сообщение (только сам переход). Стартовое сообщение шлётся один раз
+        на первом цикле, но только в режиме постоянного процесса: при
+        ``once`` (CLI ``--once``, cron) оно отключено — иначе каждый запуск
+        крона спамил бы «Раннер запущен».
         """
         try:
             self._notify_start_once()
@@ -154,8 +169,13 @@ class LiveRunner:
             self.notifier.send(
                 f"⚠️ network error: {escape(_short(error))}", category="error"
             )
-        except Exception:
+        except Exception as error:
             logger.exception("unexpected error in live cycle; continuing on next tick")
+            # Краши-баги должны приходить в Telegram, а не только в лог;
+            # категория error троттлится — зациклившийся баг не устроит шторм.
+            self.notifier.send(
+                f"❌ unexpected error: {escape(_short(error))}", category="error"
+            )
         self._notify_attention_if_raised()
 
     def run_forever(self) -> None:
@@ -633,8 +653,13 @@ class LiveRunner:
     # ------------------------------------------------------------------
 
     def _notify_start_once(self) -> None:
-        """Сообщить о старте процесса — один раз, на первом цикле раннера."""
-        if self._start_notified:
+        """Сообщить о старте процесса — один раз, на первом цикле раннера.
+
+        В однократном режиме (``once``, CLI ``--once``) не отправляется вовсе:
+        каждый запуск крона — «новый процесс», и без отключения он слал бы
+        critical «Раннер запущен» на каждый тик расписания.
+        """
+        if self._start_notified or self.once:
             return
         self._start_notified = True
         position = self.state.position
@@ -689,7 +714,13 @@ class LiveRunner:
 
         Первый дайджест уходит через ``heartbeat_hours`` после старта процесса
         (таймер инициализируется временем старта), дальше — раз в период.
+        Работает только в режиме постоянного процесса (``run_forever``): таймер
+        живёт в памяти процесса, в однократном режиме (``--once``, cron) между
+        запусками он не сохраняется — дайджест-эксплуатация предполагает
+        постоянный процесс, при cron-эксплуатации дайджеста нет.
         """
+        if self.once:
+            return
         interval_seconds = self.config.heartbeat_hours * 3600.0
         if interval_seconds <= 0.0:
             return

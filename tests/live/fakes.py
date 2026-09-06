@@ -147,13 +147,16 @@ def make_config(tmp_path, **overrides) -> LiveConfig:
     return LiveConfig.model_validate({**base, **overrides})
 
 
-def build_runner(cfg: LiveConfig, fake, adapter=None, strategy=None, notifier=None) -> LiveRunner:
+def build_runner(
+    cfg: LiveConfig, fake, adapter=None, strategy=None, notifier=None, once=False
+) -> LiveRunner:
     """Собрать раннер поверх подмены биржи (state читается с диска, как при рестарте).
 
     ``strategy`` позволяет подставить готовый экземпляр (напр. кастомную
     стратегию для parity-тестов); по умолчанию стратегия создаётся из реестра
     по имени в конфиге. ``notifier`` — подмена уведомлений (по умолчанию
-    заглушка без отправки).
+    заглушка без отправки). ``once`` — признак однократного запуска
+    (CLI ``--once``): стартовое сообщение и heartbeat-дайджест отключены.
     """
     client = ExchangeClient()
     client.exchange = fake
@@ -168,7 +171,9 @@ def build_runner(cfg: LiveConfig, fake, adapter=None, strategy=None, notifier=No
             price_source=lambda: client.fetch_ticker_last(cfg.symbol),
             equity_source=lambda: state.equity,
         )
-    return LiveRunner(cfg, state, strategy, adapter, client, storage, notifier=notifier)
+    return LiveRunner(
+        cfg, state, strategy, adapter, client, storage, notifier=notifier, once=once
+    )
 
 
 class RecordingNotifier:

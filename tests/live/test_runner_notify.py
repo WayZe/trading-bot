@@ -54,11 +54,13 @@ def _ok_response():
     return _Response()
 
 
-def _notify_runner(tmp_path, notifier, closes=FLAT, ticker_price=BREAKOUT_CLOSE, **overrides):
+def _notify_runner(
+    tmp_path, notifier, closes=FLAT, ticker_price=BREAKOUT_CLOSE, once=False, **overrides
+):
     """Собрать paper-раннер с подменой уведомлений; вернуть (runner, fake, cfg)."""
     cfg = make_config(tmp_path, **overrides)
     fake = FakeCcxt(donchian_rows(closes), ticker_price=ticker_price)
-    return build_runner(cfg, fake, notifier=notifier), fake, cfg
+    return build_runner(cfg, fake, notifier=notifier, once=once), fake, cfg
 
 
 def _entry_cycle(tmp_path, notifier, **overrides):
@@ -98,6 +100,62 @@ class TestStartNotification:
         starts = notifier.texts("critical")
         assert len(starts) == 1
         assert "LONG 79.166666 @ 120.0600" in starts[0]
+
+
+class TestOnceModeNotifications:
+    """``once`` (CLI ``--once``, cron): старт и heartbeat молчат, сделки — нет.
+
+    Каждый крон-запуск — «новый процесс»: без отключения стартовое critical
+    сообщение уходило бы на каждый тик расписания, а heartbeat-дайджест
+    (таймер в памяти процесса) не приходил бы никогда.
+    """
+
+    def test_once_run_sends_no_start_message_and_no_heartbeat(
+        self, tmp_path, mocker
+    ) -> None:
+        notifier = RecordingNotifier()
+        clock = mocker.patch.object(LiveRunner, "_now_ts", return_value=1000.0)
+        runner, _, _ = _notify_runner(tmp_path, notifier, ticker_price=100.0, once=True)
+
+        runner.run_once()
+        assert notifier.texts("critical") == []  # старт-сообщения нет
+        assert notifier.texts("info") == []
+
+        clock.return_value = 1000.0 + 10 * 24 * 3600.0  # намного больше 24 ч
+        runner.run_once()
+
+        assert notifier.texts("critical") == []
+        assert notifier.texts("info") == []  # heartbeat-дайджеста нет
+
+    def test_forever_mode_keeps_start_and_heartbeat(self, tmp_path, mocker) -> None:
+        notifier = RecordingNotifier()
+        clock = mocker.patch.object(LiveRunner, "_now_ts", return_value=1000.0)
+        runner, _, _ = _notify_runner(tmp_path, notifier, ticker_price=100.0)
+
+        runner.run_once()
+        starts = notifier.texts("critical")
+        assert len(starts) == 1
+        assert "Раннер запущен" in starts[0]
+
+        clock.return_value = 1000.0 + 25 * 3600.0
+        runner.run_once()
+
+        assert len(notifier.texts("info")) == 1  # дайджест уходит, как раньше
+
+    def test_once_mode_still_reports_trades(self, tmp_path) -> None:
+        notifier = RecordingNotifier()
+        runner, fake, _ = _notify_runner(
+            tmp_path, notifier, ticker_price=100.0, once=True
+        )
+        runner.run_once()  # чистый state: только прогрев
+
+        append_candle(fake, [*FLAT, BREAKOUT_CLOSE])
+        fake.ticker_price = BREAKOUT_CLOSE
+        runner.run_once()  # вход
+
+        trades = notifier.texts("trade")
+        assert len(trades) == 1
+        assert "📈 LONG BTC/USDT" in trades[0]
 
 
 class TestTradeNotifications:
@@ -308,6 +366,28 @@ class TestNetworkErrorNotifications:
         assert state.position is not None
         assert fake.private_calls == []  # paper-инвариант не задет
         assert runner.state.position is not None
+
+
+class TestUnexpectedErrorNotifications:
+    """Неожиданные (не-сетевые) ошибки цикла уходят в Telegram, а не только в лог."""
+
+    def test_unexpected_error_notified_and_cycle_survives(self, tmp_path) -> None:
+        notifier = RecordingNotifier()
+
+        class ExplodingTicker(FakeCcxt):
+            def fetch_ticker(self, symbol) -> dict:
+                raise RuntimeError("boom: unexpected bug")
+
+        cfg = make_config(tmp_path)
+        fake = ExplodingTicker(donchian_rows(FLAT), ticker_price=100.0)
+        runner = build_runner(cfg, fake, notifier=notifier)
+
+        runner.run_once()  # исключение глотается: раннер продолжает работу
+
+        errors = notifier.texts("error")
+        assert len(errors) == 1
+        assert errors[0].startswith("❌ unexpected error")
+        assert "boom: unexpected bug" in errors[0]
 
 
 class TestHeartbeatDigest:

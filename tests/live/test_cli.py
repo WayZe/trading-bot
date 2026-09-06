@@ -12,7 +12,8 @@ import yaml
 from typer.testing import CliRunner
 
 from tests.live.fakes import FakeCcxt, donchian_rows
-from trading_bot.cli import app
+from trading_bot.cli import _build_notifier, app
+from trading_bot.config import LiveConfig
 from trading_bot.data.exchange import ExchangeClient
 
 runner = CliRunner()
@@ -285,16 +286,28 @@ class TestTelegramEnv:
         )
 
         with caplog.at_level(logging.INFO):
-            result = runner.invoke(app, ["live", "--config", str(config), "--once"])
+            first = runner.invoke(app, ["live", "--config", str(config), "--once"])
 
-        assert result.exit_code == 0, result.output
+        assert first.exit_code == 0, first.output
         assert "telegram notifications enabled" in caplog.text
-        # Стартовое уведомление ушло в Telegram с правильным chat_id.
+        # --once (cron): старт-сообщения и heartbeat нет — в чистый прогревный
+        # цикл Telegram вообще не дёргается.
+        urlopen.assert_not_called()
+
+        # Свеча-пробой: второй cron-запуск исполняет вход и шлёт trade-уведомление.
+        fake.rows.append(donchian_rows([100.0] * 6 + [120.0])[-1])
+        fake.ticker_price = 120.0
+        _patched_client(mocker, fake)
+        second = runner.invoke(app, ["live", "--config", str(config), "--once"])
+
+        assert second.exit_code == 0, second.output
         assert urlopen.call_count == 1
         request = urlopen.call_args.args[0]
         assert "/botenv-secret-token-777/" in request.full_url
+        payload = json.loads(request.data.decode("utf-8"))
+        assert payload["chat_id"] == "42"
         # Значения не попадают ни в stdout, ни в логи.
-        assert "env-secret-token-777" not in result.output
+        assert "env-secret-token-777" not in second.output
         assert "env-secret-token-777" not in caplog.text
 
     def test_without_env_notifications_are_disabled(
@@ -315,23 +328,17 @@ class TestTelegramEnv:
         assert "notifications are disabled" in caplog.text
         urlopen.assert_not_called()
 
-    def test_config_fields_take_priority_over_env(self, tmp_path, monkeypatch, mocker) -> None:
-        monkeypatch.chdir(tmp_path)
+    def test_config_fields_take_priority_over_env(self, monkeypatch) -> None:
+        # Поля конфига приоритетнее окружения (код остаётся гибким): проверяем
+        # сборщика нотификатора напрямую — в --once на прогревном цикле
+        # сообщений нет, сетью ходить не из чего.
         monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "env-token")
         monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
-        config_text = (
-            LIVE_CONFIG + "telegram_bot_token: config-token\ntelegram_chat_id: \"99\"\n"
+        cfg = LiveConfig.model_validate(
+            {"telegram_bot_token": "config-token", "telegram_chat_id": "99"}
         )
-        config = _write_config(tmp_path, config_text)
-        fake = FakeCcxt(donchian_rows([100.0] * 6), ticker_price=100.0)
-        _patched_client(mocker, fake)
-        urlopen = mocker.patch(
-            "trading_bot.live.notify.urlopen", return_value=_ok_telegram_response()
-        )
+        notifier = _build_notifier(cfg)
 
-        result = runner.invoke(app, ["live", "--config", str(config), "--once"])
-
-        assert result.exit_code == 0, result.output
-        assert "/botconfig-token/" in urlopen.call_args.args[0].full_url
-        payload = json.loads(urlopen.call_args.args[0].data.decode("utf-8"))
-        assert payload["chat_id"] == "99"
+        assert notifier.enabled is True
+        assert notifier._bot_token == "config-token"
+        assert notifier._chat_id == "99"

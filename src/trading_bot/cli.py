@@ -158,6 +158,12 @@ def live(
     свеча) переживает рестарты через JSON-файл из конфига. Параллельный
     запуск над тем же state-файлом запрещён эксклюзивной блокировкой
     (``<state>.lock``): два раннера на одном состоянии задвоили бы ордера.
+
+    ``--once`` (cron): стартовое Telegram-сообщение и heartbeat-дайджест
+    отключены — каждый запуск крона «новый процесс», без этого они либо
+    спамили бы «Раннер запущен», либо дайджест никогда не уходил. Сделки,
+    свитчи, сбои и ``needs_attention`` уведомляются как раньше; дайджест
+    работает только в режиме постоянного процесса (без ``--once``).
     """
     try:
         cfg = load_live_config(config)
@@ -211,6 +217,7 @@ def live(
         exchange_client=exchange_client,
         storage=CandleStorage(cfg.data_root),
         notifier=_build_notifier(cfg),
+        once=once,
     )
     if cfg.mode == "testnet":
         runner.reconcile()
