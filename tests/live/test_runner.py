@@ -18,12 +18,12 @@ from tests.live.fakes import (
     FakeCcxt,
     PrivateCcxt,
     append_candle,
+    build_client,
     build_runner,
     donchian_rows,
     make_config,
     make_runner,
 )
-from trading_bot.data.exchange import ExchangeClient
 from trading_bot.data.storage import CandleStorage
 from trading_bot.engine.backtest import BacktestEngine
 from trading_bot.engine.broker import SimulatedBroker
@@ -735,10 +735,3 @@ class TestTakeProfitParity:
         # движке, и исполняется по тому же уровню.
         assert live_tp == pytest.approx(engine_entry_price + 10.0)
         assert live_exit_price == pytest.approx(engine_exit_price)
-
-
-def build_client(fake):
-    """Обернуть подмену ccxt в ExchangeClient (без реальной сети)."""
-    client = ExchangeClient()
-    client.exchange = fake
-    return client

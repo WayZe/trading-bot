@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 
 import pandas as pd
 import pytest
@@ -252,3 +253,85 @@ def test_banner_shows_both_switches(tmp_path, monkeypatch, mocker) -> None:
     assert result.exit_code == 0, result.output
     assert "Kill switch (data/live/STOP): off" in result.output
     assert "Pause switch (data/live/PAUSE): off" in result.output
+
+
+def _ok_telegram_response():
+    class _Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    return _Response()
+
+
+class TestTelegramEnv:
+    """Пустые поля конфига дополняются из env; значения не логируются."""
+
+    def test_env_variables_enable_notifications(
+        self, tmp_path, monkeypatch, mocker, caplog
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "env-secret-token-777")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+        config = _write_config(tmp_path, LIVE_CONFIG)
+        fake = FakeCcxt(donchian_rows([100.0] * 6), ticker_price=100.0)
+        _patched_client(mocker, fake)
+        urlopen = mocker.patch(
+            "trading_bot.live.notify.urlopen", return_value=_ok_telegram_response()
+        )
+
+        with caplog.at_level(logging.INFO):
+            result = runner.invoke(app, ["live", "--config", str(config), "--once"])
+
+        assert result.exit_code == 0, result.output
+        assert "telegram notifications enabled" in caplog.text
+        # Стартовое уведомление ушло в Telegram с правильным chat_id.
+        assert urlopen.call_count == 1
+        request = urlopen.call_args.args[0]
+        assert "/botenv-secret-token-777/" in request.full_url
+        # Значения не попадают ни в stdout, ни в логи.
+        assert "env-secret-token-777" not in result.output
+        assert "env-secret-token-777" not in caplog.text
+
+    def test_without_env_notifications_are_disabled(
+        self, tmp_path, monkeypatch, mocker, caplog
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+        monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+        config = _write_config(tmp_path, LIVE_CONFIG)
+        fake = FakeCcxt(donchian_rows([100.0] * 6), ticker_price=100.0)
+        _patched_client(mocker, fake)
+        urlopen = mocker.patch("trading_bot.live.notify.urlopen")
+
+        with caplog.at_level(logging.INFO):
+            result = runner.invoke(app, ["live", "--config", str(config), "--once"])
+
+        assert result.exit_code == 0, result.output
+        assert "notifications are disabled" in caplog.text
+        urlopen.assert_not_called()
+
+    def test_config_fields_take_priority_over_env(self, tmp_path, monkeypatch, mocker) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "env-token")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+        config_text = (
+            LIVE_CONFIG + "telegram_bot_token: config-token\ntelegram_chat_id: \"99\"\n"
+        )
+        config = _write_config(tmp_path, config_text)
+        fake = FakeCcxt(donchian_rows([100.0] * 6), ticker_price=100.0)
+        _patched_client(mocker, fake)
+        urlopen = mocker.patch(
+            "trading_bot.live.notify.urlopen", return_value=_ok_telegram_response()
+        )
+
+        result = runner.invoke(app, ["live", "--config", str(config), "--once"])
+
+        assert result.exit_code == 0, result.output
+        assert "/botconfig-token/" in urlopen.call_args.args[0].full_url
+        payload = json.loads(urlopen.call_args.args[0].data.decode("utf-8"))
+        assert payload["chat_id"] == "99"

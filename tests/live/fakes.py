@@ -147,12 +147,13 @@ def make_config(tmp_path, **overrides) -> LiveConfig:
     return LiveConfig.model_validate({**base, **overrides})
 
 
-def build_runner(cfg: LiveConfig, fake, adapter=None, strategy=None) -> LiveRunner:
+def build_runner(cfg: LiveConfig, fake, adapter=None, strategy=None, notifier=None) -> LiveRunner:
     """Собрать раннер поверх подмены биржи (state читается с диска, как при рестарте).
 
     ``strategy`` позволяет подставить готовый экземпляр (напр. кастомную
     стратегию для parity-тестов); по умолчанию стратегия создаётся из реестра
-    по имени в конфиге.
+    по имени в конфиге. ``notifier`` — подмена уведомлений (по умолчанию
+    заглушка без отправки).
     """
     client = ExchangeClient()
     client.exchange = fake
@@ -167,7 +168,31 @@ def build_runner(cfg: LiveConfig, fake, adapter=None, strategy=None) -> LiveRunn
             price_source=lambda: client.fetch_ticker_last(cfg.symbol),
             equity_source=lambda: state.equity,
         )
-    return LiveRunner(cfg, state, strategy, adapter, client, storage)
+    return LiveRunner(cfg, state, strategy, adapter, client, storage, notifier=notifier)
+
+
+class RecordingNotifier:
+    """Подмена уведомителя: копит (category, text) и никогда не падает."""
+
+    enabled = True
+
+    def __init__(self) -> None:
+        self.messages: list[tuple[str, str]] = []
+
+    def send(self, text: str, *, category: str = "info") -> bool:
+        self.messages.append((category, text))
+        return True
+
+    def texts(self, category: str) -> list[str]:
+        """Тексты сообщений конкретной категории (по порядку отправки)."""
+        return [text for cat, text in self.messages if cat == category]
+
+
+def build_client(fake):
+    """Обернуть подмену ccxt в ExchangeClient (без реальной сети)."""
+    client = ExchangeClient()
+    client.exchange = fake
+    return client
 
 
 def make_runner(tmp_path, closes: list[float], ticker_price: float = 100.0, **overrides):

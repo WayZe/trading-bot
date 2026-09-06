@@ -188,6 +188,20 @@ class TestLiveConfig:
     def test_testnet_mode_passes(self) -> None:
         assert LiveConfig(mode="testnet").mode == "testnet"
 
+    def test_notification_defaults(self) -> None:
+        cfg = LiveConfig()
+
+        assert cfg.telegram_bot_token is None
+        assert cfg.telegram_chat_id is None
+        assert cfg.heartbeat_hours == 24.0
+        assert cfg.error_throttle_minutes == 60
+
+    def test_negative_heartbeat_or_throttle_raises(self) -> None:
+        with pytest.raises(ValidationError, match="heartbeat_hours"):
+            LiveConfig(heartbeat_hours=-1.0)
+        with pytest.raises(ValidationError, match="error_throttle_minutes"):
+            LiveConfig(error_throttle_minutes=-1)
+
     def test_unknown_mode_raises(self) -> None:
         with pytest.raises(ValidationError, match="mode"):
             LiveConfig(mode="real")

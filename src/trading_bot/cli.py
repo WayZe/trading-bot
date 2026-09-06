@@ -23,6 +23,7 @@ from trading_bot.data.storage import CandleStorage
 from trading_bot.engine.backtest import BacktestResult, build_engine
 from trading_bot.engine.broker import SimulatedBroker
 from trading_bot.live.execution import PaperAdapter, TestnetAdapter
+from trading_bot.live.notify import Notifier
 from trading_bot.live.runner import LiveRunner
 from trading_bot.live.state import load_or_fresh_state
 from trading_bot.report import (
@@ -58,6 +59,11 @@ RUN_FILES = ("equity.parquet", "trades.csv", "meta.json")
 # Имена переменных окружения с ключами Bybit testnet (никогда не в конфиге/git/логах).
 ENV_API_KEY = "BYBIT_API_KEY"
 ENV_API_SECRET = "BYBIT_API_SECRET"
+
+# Имена переменных окружения с ключами Telegram-уведомлений (читаются, только
+# если соответствующие поля live-конфига пусты; значения не логируются).
+ENV_TELEGRAM_BOT_TOKEN = "TELEGRAM_BOT_TOKEN"
+ENV_TELEGRAM_CHAT_ID = "TELEGRAM_CHAT_ID"
 
 # Имена сеток, которые конфликтовали бы с колонками результата sweep.
 _RESERVED_PARAM_NAMES = frozenset(METRIC_COLUMNS) | {"error"}
@@ -204,6 +210,7 @@ def live(
         adapter=adapter,
         exchange_client=exchange_client,
         storage=CandleStorage(cfg.data_root),
+        notifier=_build_notifier(cfg),
     )
     if cfg.mode == "testnet":
         runner.reconcile()
@@ -214,6 +221,18 @@ def live(
         runner.run_once()
     else:
         runner.run_forever()
+
+
+def _build_notifier(cfg: LiveConfig) -> Notifier:
+    """Собрать отправителя Telegram-уведомлений (env — фолбэк для пустых полей).
+
+    Поля конфига приоритетнее; пустые (``None``) дополняются из окружения
+    ``TELEGRAM_BOT_TOKEN``/``TELEGRAM_CHAT_ID``. Значения не логируются —
+    только сам факт enabled/disabled (это делает конструктор ``Notifier``).
+    """
+    token = cfg.telegram_bot_token or os.environ.get(ENV_TELEGRAM_BOT_TOKEN)
+    chat_id = cfg.telegram_chat_id or os.environ.get(ENV_TELEGRAM_CHAT_ID)
+    return Notifier(token, chat_id, error_throttle_minutes=cfg.error_throttle_minutes)
 
 
 def _acquire_state_lock(state_path: str | Path):

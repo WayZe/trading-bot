@@ -23,6 +23,12 @@
    исполнения и после каждой обработанной свечи — крэш посреди цикла не
    теряет ни позицию, ни историю.
 
+Уведомления Telegram (опционально, ``live/notify.py``): старт процесса,
+входы/выходы и защитные стоп/тейк, подъём ``needs_attention``, переходы
+STOP/PAUSE, троттлируемые сетевые сбои и суточный heartbeat-дайджест.
+Сбой отправки никогда не рвёт торговый цикл: ``Notifier.send`` глотает
+любые исключения сам (токен при этом не попадает в лог).
+
 Гарантия от дубля ордера (testnet): любая ошибка исполнения, оставляющая
 неясным факт или результат размещения ордера (NetworkError на создание,
 сбой после успешного создания — упал fetch_order, статус не распарсился),
@@ -63,6 +69,7 @@ from trading_bot.engine.stops import (
     reanchor_take_profit_above,
 )
 from trading_bot.live.execution import ExecutionAdapter, FillResult, OrderStateUncertain
+from trading_bot.live.notify import Notifier, NullNotifier, escape
 from trading_bot.live.state import LiveState
 from trading_bot.risk import RiskManager
 from trading_bot.strategy.base import Fill, Signal, SignalKind, Strategy
@@ -71,6 +78,12 @@ logger = logging.getLogger(__name__)
 
 # Полная догрузка при чистом состоянии: совпадает с диапазоном research-датасетов.
 BACKFILL_SINCE = "2023-01-01"
+
+# Подписи защитных выходов в Telegram-уведомлениях (reason-строки — английские).
+_EXIT_LABELS = {
+    REASON_STOP_LOSS: "🛑 Стоп-лосс",
+    REASON_TAKE_PROFIT: "🎯 Тейк-профит",
+}
 
 
 class LiveRunner:
@@ -84,6 +97,9 @@ class LiveRunner:
         exchange_client: обёртка ccxt (публичные данные; приватные вызовы
             выполняет только testnet-адаптер).
         storage: Parquet-хранилище live-свечей (корень из конфига).
+        notifier: отправитель Telegram-уведомлений; ``None`` — заглушка
+            :class:`NullNotifier` (цикл работает как раньше, ничего не шлёт).
+            Сбой отправки не рвёт торговый цикл: ``send`` глотает всё сам.
     """
 
     def __init__(
@@ -94,6 +110,7 @@ class LiveRunner:
         adapter: ExecutionAdapter,
         exchange_client: object,
         storage: CandleStorage,
+        notifier: Notifier | None = None,
     ) -> None:
         self.config = config
         self.state = state
@@ -101,6 +118,16 @@ class LiveRunner:
         self.adapter = adapter
         self.exchange_client = exchange_client
         self.storage = storage
+        self.notifier = notifier if notifier is not None else NullNotifier()
+        # Память уведомлений: старт (один раз за процесс), предыдущие состояния
+        # свитчей (первый цикл — начальное состояние, без уведомлений), флаг
+        # attention (рестарт с уже поднятым флагом не спамит повторно) и таймер
+        # heartbeat-дайджеста (первый — через heartbeat_hours после старта).
+        self._start_notified = False
+        self._attention_notified = state.needs_attention
+        self._stop_active: bool | None = None
+        self._pause_active: bool | None = None
+        self._last_heartbeat_sent = self._now_ts()
         self.risk = RiskManager(
             position_size_pct=config.position_size_pct,
             quantity_precision=config.quantity_precision,
@@ -114,14 +141,22 @@ class LiveRunner:
 
         Сетевые ошибки логируются как warning (цикл повторится на следующем
         тике), любые другие исключения — как error с traceback; раннер
-        никогда не падает из-за одной неудачи.
+        никогда не падает из-за одной неудачи. Уведомления: сообщение о
+        старте процесса — один раз на первом цикле; сетевой сбой — в
+        Telegram (категория ``error``, троттлинг); поднятый за цикл флаг
+        ``needs_attention`` — критическое сообщение (только сам переход).
         """
         try:
+            self._notify_start_once()
             self._run_cycle()
         except ccxt.NetworkError as error:
             logger.warning("network error; skipping this cycle: %s", error)
+            self.notifier.send(
+                f"⚠️ network error: {escape(_short(error))}", category="error"
+            )
         except Exception:
             logger.exception("unexpected error in live cycle; continuing on next tick")
+        self._notify_attention_if_raised()
 
     def run_forever(self) -> None:
         """Основной цикл с опросом каждые ``poll_seconds``; Ctrl+C — плавный выход."""
@@ -199,7 +234,8 @@ class LiveRunner:
     # ------------------------------------------------------------------
 
     def _run_cycle(self) -> None:
-        """Один цикл: тикер → защита позиции → свечи → heartbeat."""
+        """Один цикл: свитчи → тикер → защита позиции → свечи → heartbeat."""
+        self._check_switches()
         ticker_price = self.exchange_client.fetch_ticker_last(self.config.symbol)
         if self.kill_switch_active():
             logger.warning(
@@ -211,6 +247,35 @@ class LiveRunner:
         candles = self._sync_candles()
         self._process_new_candles(candles, ticker_price)
         self._heartbeat(ticker_price)
+        self._notify_heartbeat()
+
+    def _check_switches(self) -> None:
+        """Уведомить о переходах STOP/PAUSE (только об изменении состояния).
+
+        Первый цикл после старта фиксирует начальное состояние без
+        уведомлений — рестарт с существующим свитчем не спамит повтором.
+        """
+        stop_active = self.kill_switch_active()
+        pause_active = self.pause_switch_active()
+        if self._stop_active is not None:
+            if stop_active != self._stop_active:
+                self.notifier.send(
+                    "🛑 STOP активирован: любые новые ордера запрещены "
+                    "(открытая позиция остаётся без защиты)."
+                    if stop_active
+                    else "✅ STOP снят: ордера снова разрешены.",
+                    category="switch",
+                )
+            if pause_active != self._pause_active:
+                self.notifier.send(
+                    "⏸ PAUSE активирован: новые входы запрещены, выходы "
+                    "и защитные стоп/тейк работают."
+                    if pause_active
+                    else "▶️ PAUSE снят: новые входы снова разрешены.",
+                    category="switch",
+                )
+        self._stop_active = stop_active
+        self._pause_active = pause_active
 
     def _log_unprotected_position(self, ticker_price: float) -> None:
         """STOP с открытой позицией: error каждый цикл — цена и дистанция до стопа.
@@ -282,6 +347,7 @@ class LiveRunner:
         logger.info(
             "exit filled (%s): %.6f @ %.4f (fee %.4f)", reason, fill.quantity, fill.price, fill.fee
         )
+        self._notify_exit(_EXIT_LABELS.get(reason, "📉 Выход"), position, fill)
 
     def _sync_candles(self) -> pd.DataFrame:
         """Догрузить закрытые свечи с биржи в live-хранилище и вернуть датасет.
@@ -407,10 +473,22 @@ class LiveRunner:
                 self.state.active_stop,
                 self.state.active_tp,
             )
+            stop_text = (
+                "нет"
+                if self.state.active_stop is None
+                else f"{self.state.active_stop:.4f}"
+            )
+            self.notifier.send(
+                f"📈 LONG {escape(self.config.symbol)}: "
+                f"{fill.quantity:.6f} @ {fill.price:.4f}, стоп @ {stop_text} "
+                f"({escape(signal.reason)})",
+                category="trade",
+            )
         elif signal.kind is SignalKind.LONG_EXIT:
             if self.state.position is None:
                 logger.debug("LONG_EXIT ignored: no open position")
                 return
+            position = self.state.position
             fill = self._place_order("sell", self.state.position.quantity, signal.reason)
             if fill is None:
                 return
@@ -438,6 +516,7 @@ class LiveRunner:
                 fill.price,
                 fill.fee,
             )
+            self._notify_exit("📉 Выход", position, fill)
         else:
             logger.warning("unknown signal kind %r ignored", signal.kind)
 
@@ -549,6 +628,111 @@ class LiveRunner:
             "active" if self.pause_switch_active() else "off",
         )
 
+    # ------------------------------------------------------------------
+    # Telegram-уведомления (сбои send не рвут цикл: send глотает всё сам)
+    # ------------------------------------------------------------------
+
+    def _notify_start_once(self) -> None:
+        """Сообщить о старте процесса — один раз, на первом цикле раннера."""
+        if self._start_notified:
+            return
+        self._start_notified = True
+        position = self.state.position
+        position_text = (
+            "flat"
+            if position is None
+            else f"LONG {position.quantity:.6f} @ {position.entry_price:.4f}"
+        )
+        self.notifier.send(
+            f"🟢 Раннер запущен: {escape(self.config.symbol)} "
+            f"{self.config.timeframe}, {escape(self.config.strategy)}, "
+            f"режим {self.config.mode}, позиция: {position_text}",
+            category="critical",
+        )
+
+    def _notify_attention_if_raised(self) -> None:
+        """Сообщить о подъёме ``needs_attention`` — только о самом переходе.
+
+        Флаг, уже поднятый на момент старта (рестарт с неразобранным
+        состоянием), повторного сообщения не порождает.
+        """
+        if not self.state.needs_attention or self._attention_notified:
+            return
+        self._attention_notified = True
+        reason = escape(self.state.attention_reason or "unknown reason")
+        self.notifier.send(
+            f"⚠️ Требуется внимание: {reason}. "
+            "Торговля остановлена до ручного вмешательства.",
+            category="critical",
+        )
+
+    def _notify_exit(self, label: str, position, fill: FillResult) -> None:
+        """Сообщить о выходе из позиции: цена, объём и приблизительный PnL.
+
+        PnL считается от цены входа state (без учёта комиссий) по фактической
+        цене исполнения fill — в paper точно, в testnet по фактическим ценам.
+
+        Args:
+            label: подпись события («📉 Выход», «🛑 Стоп-лосс», «🎯 Тейк-профит»).
+            position: позиция до выхода (источник цены входа).
+            fill: факт исполнения продажи.
+        """
+        pnl = fill.quantity * (fill.price - position.entry_price)
+        self.notifier.send(
+            f"{label}: {fill.quantity:.6f} @ {fill.price:.4f}, "
+            f"PnL ~{pnl:+.2f} USDT ({escape(fill.reason)})",
+            category="trade",
+        )
+
+    def _notify_heartbeat(self) -> None:
+        """Ежедневный дайджест-heartbeat (``heartbeat_hours``, 0 — выключен).
+
+        Первый дайджест уходит через ``heartbeat_hours`` после старта процесса
+        (таймер инициализируется временем старта), дальше — раз в период.
+        """
+        interval_seconds = self.config.heartbeat_hours * 3600.0
+        if interval_seconds <= 0.0:
+            return
+        now = self._now_ts()
+        if now - self._last_heartbeat_sent < interval_seconds:
+            return
+        self._last_heartbeat_sent = now
+        position = self.state.position
+        position_text = (
+            "flat"
+            if position is None
+            else f"LONG {position.quantity:.6f} @ {position.entry_price:.4f}"
+        )
+        last_ts = self.state.last_candle_timestamp()
+        if last_ts is None:
+            candle_age = "n/a"
+        else:
+            age_hours = (
+                pd.Timestamp(self._now_ms(), unit="ms", tz="UTC") - last_ts
+            ).total_seconds() / 3600.0
+            candle_age = f"{age_hours:.1f}h"
+        self.notifier.send(
+            f"💤 Heartbeat: позиция {position_text}, "
+            f"equity {self._equity_text()}, last candle age {candle_age}, "
+            f"STOP {'on' if self.kill_switch_active() else 'off'}, "
+            f"PAUSE {'on' if self.pause_switch_active() else 'off'}",
+            category="info",
+        )
+
+    def _equity_text(self) -> str:
+        """Текст эквити для дайджеста; недоступное эквити — ``n/a``.
+
+        В paper эквити ведётся в state; в testnet берётся с биржи (приватный
+        вызов — только в testnet), сбой запроса не рвёт дайджест.
+        """
+        if self.config.mode == "testnet":
+            try:
+                return f"~{self.adapter.fetch_equity():.2f}"
+            except Exception:  # дайджест важнее одного неудавшегося запроса
+                logger.warning("heartbeat: failed to fetch equity", exc_info=True)
+                return "n/a"
+        return f"~{self.state.equity:.2f}"
+
     def _warmup_strategy(self) -> None:
         """Сбросить стратегию и прогреть её на истории из хранилища.
 
@@ -593,3 +777,13 @@ class LiveRunner:
     def _now_ms() -> int:
         """Текущее время UTC в миллисекундах от эпохи (для heartbeat)."""
         return int(pd.Timestamp.now(tz="UTC").timestamp() * 1000)
+
+    @staticmethod
+    def _now_ts() -> float:
+        """Текущее время в секундах (таймер heartbeat-дайджеста; точка для тестов)."""
+        return time.time()
+
+
+def _short(text: object, limit: int = 200) -> str:
+    """Урезать длинный текст ошибки до ``limit`` символов (сообщения без простыней)."""
+    return str(text)[:limit]
