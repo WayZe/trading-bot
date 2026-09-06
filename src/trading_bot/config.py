@@ -125,6 +125,14 @@ class LiveConfig(BaseModel):
             запрещены только новые входы — сигнальные выходы и защитные
             стоп/тейк исполняются как обычно.
         log_file: путь к rotating-логу раннера.
+        telegram_bot_token: токен Telegram-бота для уведомлений; ``None`` —
+            взять из env ``TELEGRAM_BOT_TOKEN`` (значения не логируются никогда).
+        telegram_chat_id: chat id получателя уведомлений; ``None`` — взять из
+            env ``TELEGRAM_CHAT_ID``.
+        heartbeat_hours: период heartbeat-дайджеста в Telegram, часы;
+            ``0`` — дайджест выключен.
+        error_throttle_minutes: минимальный интервал между уведомлениями
+            категории «error» (сетевые/данные сбои), минуты.
     """
 
     symbol: str = "BTC/USDT"
@@ -155,6 +163,10 @@ class LiveConfig(BaseModel):
     kill_switch_path: str = "data/live/STOP"
     pause_switch_path: str = "data/live/PAUSE"
     log_file: str = "logs/live.log"
+    telegram_bot_token: str | None = None
+    telegram_chat_id: str | None = None
+    heartbeat_hours: float = Field(default=24.0, ge=0.0)
+    error_throttle_minutes: int = Field(default=60, ge=0)
 
     @field_validator("timeframe")
     @classmethod
