@@ -1,0 +1,19 @@
+# Paper/testnet-раннер торгового бота.
+# Запуск: docker compose up -d --build
+# Остановка торговли без остановки контейнера: touch data/live/STOP (полная) или data/live/PAUSE (только входы).
+services:
+  live:
+    build: .
+    image: trading-bot:latest
+    container_name: trading-bot-live
+    restart: unless-stopped
+    command: ["live", "--config", "config/live.yaml"]
+    volumes:
+      - ./data:/app/data        # state.json, выключатели STOP/PAUSE, свечи
+      - ./logs:/app/logs        # ротируемый лог
+      - ./config:/app/config    # live.yaml
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
