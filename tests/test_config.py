@@ -185,6 +185,7 @@ class TestLiveConfig:
         assert cfg.strategy_params["entry_period"] == 40
         assert cfg.strategy_params["trend_period"] == 100
         assert cfg.pause_switch_path == "data/live/PAUSE"
+        assert cfg.heartbeat_time == "10:00"
 
     def test_shipped_live_config_has_no_telegram_secret_fields(self) -> None:
         """Канарейка: в коммитимом config/live.yaml нет полей токена Telegram.
@@ -207,12 +208,32 @@ class TestLiveConfig:
 
         assert cfg.telegram_bot_token is None
         assert cfg.telegram_chat_id is None
-        assert cfg.heartbeat_hours == 24.0
+        assert cfg.heartbeat_time == "10:00"
         assert cfg.error_throttle_minutes == 60
 
-    def test_negative_heartbeat_or_throttle_raises(self) -> None:
-        with pytest.raises(ValidationError, match="heartbeat_hours"):
-            LiveConfig(heartbeat_hours=-1.0)
+    def test_heartbeat_time_none_and_empty_disable_digest(self) -> None:
+        assert LiveConfig(heartbeat_time=None).heartbeat_time is None
+        # Пустая строка нормализуется в None (дайджест выключен).
+        assert LiveConfig(heartbeat_time="").heartbeat_time is None
+
+    def test_heartbeat_time_accepts_valid_times(self) -> None:
+        for value in ("00:00", "09:30", "10:00", "23:59"):
+            assert LiveConfig(heartbeat_time=value).heartbeat_time == value
+
+    def test_bad_heartbeat_time_raises(self) -> None:
+        for value in ("25:00", "10:60", "1000", "10-00", "7:30"):
+            with pytest.raises(ValidationError, match="heartbeat_time"):
+                LiveConfig(heartbeat_time=value)
+
+    def test_unquoted_yaml_int_heartbeat_time_raises_with_quote_hint(self) -> None:
+        # YAML-ловушка: heartbeat_time: 10:00 без кавычек парсится как int 600.
+        with pytest.raises(
+            ValidationError,
+            match=r"heartbeat_time must be a string 'HH:MM'.*quote it in YAML",
+        ):
+            LiveConfig(heartbeat_time=600)
+
+    def test_negative_throttle_raises(self) -> None:
         with pytest.raises(ValidationError, match="error_throttle_minutes"):
             LiveConfig(error_throttle_minutes=-1)
 

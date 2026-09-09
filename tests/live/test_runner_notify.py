@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import ccxt
@@ -25,7 +26,7 @@ from tests.live.fakes import (
 )
 from trading_bot.live.execution import TestnetAdapter as _TestnetAdapter
 from trading_bot.live.notify import Notifier, NullNotifier
-from trading_bot.live.runner import LiveRunner
+from trading_bot.live.runner import MSK_TZ, LiveRunner
 from trading_bot.live.state import load_or_fresh_state
 
 START_CASH = 10_000.0
@@ -37,6 +38,16 @@ BREAKOUT_CLOSE = 120.0
 STOP_DISTANCE = 44.0
 
 TELEGRAM_TOKEN = "555:runner-test-token"
+
+# Якорная дата для heartbeat-тестов: фиксирована, чтобы тесты не зависели от
+# реального времени выполнения; МСК = фиксированный UTC+3 (как в раннере).
+_FIXED_MSK_DAY = datetime(2026, 5, 4, tzinfo=MSK_TZ)
+
+
+def _msk(hour: int, minute: int = 0, day_offset: int = 0) -> float:
+    """Timestamp (сек) фиксированного момента МСК: якорный день + offset, HH:MM."""
+    moment = _FIXED_MSK_DAY + timedelta(days=day_offset)
+    return moment.replace(hour=hour, minute=minute).timestamp()
 
 
 def _ok_response():
@@ -114,14 +125,14 @@ class TestOnceModeNotifications:
         self, tmp_path, mocker
     ) -> None:
         notifier = RecordingNotifier()
-        clock = mocker.patch.object(LiveRunner, "_now_ts", return_value=1000.0)
+        clock = mocker.patch.object(LiveRunner, "_now_ts", return_value=_msk(hour=7))
         runner, _, _ = _notify_runner(tmp_path, notifier, ticker_price=100.0, once=True)
 
         runner.run_once()
         assert notifier.texts("critical") == []  # старт-сообщения нет
         assert notifier.texts("info") == []
 
-        clock.return_value = 1000.0 + 10 * 24 * 3600.0  # намного больше 24 ч
+        clock.return_value = _msk(day_offset=10, hour=12)  # много дней спустя
         runner.run_once()
 
         assert notifier.texts("critical") == []
@@ -129,7 +140,7 @@ class TestOnceModeNotifications:
 
     def test_forever_mode_keeps_start_and_heartbeat(self, tmp_path, mocker) -> None:
         notifier = RecordingNotifier()
-        clock = mocker.patch.object(LiveRunner, "_now_ts", return_value=1000.0)
+        clock = mocker.patch.object(LiveRunner, "_now_ts", return_value=_msk(hour=7))
         runner, _, _ = _notify_runner(tmp_path, notifier, ticker_price=100.0)
 
         runner.run_once()
@@ -137,7 +148,7 @@ class TestOnceModeNotifications:
         assert len(starts) == 1
         assert "Раннер запущен" in starts[0]
 
-        clock.return_value = 1000.0 + 25 * 3600.0
+        clock.return_value = _msk(hour=10)  # плановое время — дайджест уходит
         runner.run_once()
 
         assert len(notifier.texts("info")) == 1  # дайджест уходит, как раньше
@@ -391,18 +402,22 @@ class TestUnexpectedErrorNotifications:
 
 
 class TestHeartbeatDigest:
-    def test_digest_sent_after_heartbeat_hours(self, tmp_path, mocker) -> None:
+    """Дайджест уходит раз в сутки в фиксированное время (``heartbeat_time``, МСК)."""
+
+    def test_digest_sent_at_heartbeat_time_once_per_day(
+        self, tmp_path, mocker
+    ) -> None:
+        # Старт в 07:00 МСК: до планового времени тишина; ровно в 10:00:00
+        # (граница <=) дайджест уходит один раз, повторно в тот же день — нет.
         notifier = RecordingNotifier()
-        clock = mocker.patch.object(LiveRunner, "_now_ts", return_value=1000.0)
+        clock = mocker.patch.object(LiveRunner, "_now_ts", return_value=_msk(hour=7))
         runner, _, _ = _notify_runner(tmp_path, notifier, ticker_price=100.0)
 
         runner.run_once()
-        assert notifier.texts("info") == []  # первый дайджест не сразу после старта
+        assert notifier.texts("info") == []
 
-        clock.return_value = 1000.0 + 25 * 3600.0
+        clock.return_value = _msk(hour=10)  # ровно 10:00:00 МСК
         runner.run_once()
-        runner.run_once()  # сразу повторно — дайджест не дублируется
-
         digests = notifier.texts("info")
         assert len(digests) == 1
         assert digests[0].startswith("💤 Heartbeat")
@@ -411,14 +426,34 @@ class TestHeartbeatDigest:
         assert "last candle age" in digests[0]
         assert "STOP off, PAUSE off" in digests[0]
 
-    def test_digest_disabled_with_zero_hours(self, tmp_path, mocker) -> None:
+        runner.run_once()  # тот же момент: дайджест не дублируется
+        assert len(notifier.texts("info")) == 1
+
+    def test_first_digest_next_day_when_started_after_heartbeat_time(
+        self, tmp_path, mocker
+    ) -> None:
+        # Старт в 15:00 МСК: сегодняшние 10:00 уже прошли — сегодня дайджеста
+        # нет, первый уходит на следующий день в 10:00.
         notifier = RecordingNotifier()
-        clock = mocker.patch.object(LiveRunner, "_now_ts", return_value=1000.0)
+        clock = mocker.patch.object(LiveRunner, "_now_ts", return_value=_msk(hour=15))
+        runner, _, _ = _notify_runner(tmp_path, notifier, ticker_price=100.0)
+
+        clock.return_value = _msk(hour=16)
+        runner.run_once()
+        assert notifier.texts("info") == []
+
+        clock.return_value = _msk(day_offset=1, hour=10)
+        runner.run_once()
+        assert len(notifier.texts("info")) == 1
+
+    def test_digest_disabled_with_none_time(self, tmp_path, mocker) -> None:
+        notifier = RecordingNotifier()
+        clock = mocker.patch.object(LiveRunner, "_now_ts", return_value=_msk(hour=7))
         runner, _, _ = _notify_runner(
-            tmp_path, notifier, ticker_price=100.0, heartbeat_hours=0.0
+            tmp_path, notifier, ticker_price=100.0, heartbeat_time=None
         )
 
-        clock.return_value = 1000.0 + 10_000 * 3600.0
+        clock.return_value = _msk(day_offset=10, hour=10)
         runner.run_once()
         runner.run_once()
 
@@ -426,27 +461,25 @@ class TestHeartbeatDigest:
 
     def test_digest_reports_open_position(self, tmp_path, mocker) -> None:
         notifier = RecordingNotifier()
-        clock = mocker.patch.object(LiveRunner, "_now_ts", return_value=1000.0)
+        clock = mocker.patch.object(LiveRunner, "_now_ts", return_value=_msk(hour=7))
         runner, fake, _ = _entry_cycle(tmp_path, notifier)
 
-        clock.return_value = 1000.0 + 30 * 3600.0
+        clock.return_value = _msk(hour=11)
         fake.ticker_price = BREAKOUT_CLOSE
         runner.run_once()
 
         digest = notifier.texts("info")[0]
         assert "LONG 79.166666 @ 120.0600" in digest
 
-    def test_first_digest_comes_only_after_interval_not_at_start(
-        self, tmp_path, mocker
-    ) -> None:
-        # Частые рестарты не должны штормить дайджестами: таймер стартует
-        # со временем старта процесса, первый дайджест — через interval.
+    def test_no_digest_before_scheduled_time(self, tmp_path, mocker) -> None:
+        # Частые циклы до планового времени молчат: дайджест привязан к
+        # фиксированному времени суток, а не к старту процесса.
         notifier = RecordingNotifier()
-        clock = mocker.patch.object(LiveRunner, "_now_ts", return_value=1000.0)
+        clock = mocker.patch.object(LiveRunner, "_now_ts", return_value=_msk(hour=7))
         runner, _, _ = _notify_runner(tmp_path, notifier, ticker_price=100.0)
 
-        for step_hours in (10 / 60, 1.0, 2.0):  # 10 мин, 1 ч, 2 ч — всё меньше 24 ч
-            clock.return_value = 1000.0 + step_hours * 3600.0
+        for moment in (_msk(hour=8), _msk(hour=9), _msk(hour=9, minute=59)):
+            clock.return_value = moment
             runner.run_once()
 
         assert notifier.texts("info") == []

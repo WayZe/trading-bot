@@ -97,7 +97,8 @@ Make-цели (см. Makefile): `make sync`, `make test`, `make lint`, `make dow
     (`error_throttle_minutes`); раннер шлёт старт, сделки, стоп/тейк,
     `needs_attention` (только переход), переходы STOP/PAUSE (первый цикл —
     начальное состояние, без спама) и суточный heartbeat-дайджест
-    (`heartbeat_hours`, 0 — выключен; таймер от старта процесса);
+    (`heartbeat_time`, по умолчанию "10:00" МСК; null — выключен; только в
+    режиме постоянного процесса);
   - `ExchangeClient` без ключей — только публичные данные; ключи (только env:
     `BYBIT_API_KEY`/`BYBIT_API_SECRET`) включают приватные методы и sandbox.
 - `cli.py` — команды typer + сохранение артефактов (`reports/last_run`,

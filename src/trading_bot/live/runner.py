@@ -59,6 +59,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import ccxt
@@ -89,6 +90,11 @@ _EXIT_LABELS = {
     REASON_STOP_LOSS: "🛑 Стоп-лосс",
     REASON_TAKE_PROFIT: "🎯 Тейк-профит",
 }
+
+# Москва живёт в фиксированном UTC+3 (перехода на летнее время нет), поэтому
+# для heartbeat-расписания достаточно фиксированного offset: zoneinfo/tzdata
+# не подключаем — в docker-slim-образе данных часовых поясов может не быть.
+MSK_TZ = timezone(timedelta(hours=3))
 
 
 class LiveRunner:
@@ -133,13 +139,15 @@ class LiveRunner:
         self.once = once
         # Память уведомлений: старт (один раз за процесс), предыдущие состояния
         # свитчей (первый цикл — начальное состояние, без уведомлений), флаг
-        # attention (рестарт с уже поднятым флагом не спамит повторно) и таймер
-        # heartbeat-дайджеста (первый — через heartbeat_hours после старта).
+        # attention (рестарт с уже поднятым флагом не спамит повторно) и
+        # планировщик heartbeat-дайджеста (первый — в ближайшие heartbeat_time
+        # МСК после старта процесса: до 10:00 — в тот же день, после — на
+        # следующий).
         self._start_notified = False
         self._attention_notified = state.needs_attention
         self._stop_active: bool | None = None
         self._pause_active: bool | None = None
-        self._last_heartbeat_sent = self._now_ts()
+        self._next_heartbeat_ts = self._schedule_next_heartbeat(self._now_ts())
         self.risk = RiskManager(
             position_size_pct=config.position_size_pct,
             quantity_precision=config.quantity_precision,
@@ -709,25 +717,52 @@ class LiveRunner:
             category="trade",
         )
 
-    def _notify_heartbeat(self) -> None:
-        """Ежедневный дайджест-heartbeat (``heartbeat_hours``, 0 — выключен).
+    def _schedule_next_heartbeat(self, now: float) -> float:
+        """Timestamp ближайшего планового heartbeat-дайджеста после ``now``.
 
-        Первый дайджест уходит через ``heartbeat_hours`` после старта процесса
-        (таймер инициализируется временем старта), дальше — раз в период.
-        Работает только в режиме постоянного процесса (``run_forever``): таймер
-        живёт в памяти процесса, в однократном режиме (``--once``, cron) между
-        запусками он не сохраняется — дайджест-эксплуатация предполагает
-        постоянный процесс, при cron-эксплуатации дайджеста нет.
+        Плановое время — сегодня в ``heartbeat_time`` по МСК (секунды и
+        микросекунды сбрасываются); если оно уже наступило (``<=``: ровно в
+        назначенный момент дайджест отправляется сейчас) — то же время завтра.
+        Выключенный дайджест (``heartbeat_time is None``) даёт ``inf`` —
+        отправка никогда не наступает.
+
+        Args:
+            now: текущий момент, секунды от эпохи.
+
+        Returns:
+            Timestamp планового дайджеста в секундах.
         """
-        if self.once:
-            return
-        interval_seconds = self.config.heartbeat_hours * 3600.0
-        if interval_seconds <= 0.0:
+        if self.config.heartbeat_time is None:
+            return math.inf
+        hours_text, minutes_text = self.config.heartbeat_time.split(":")
+        now_msk = datetime.fromtimestamp(now, tz=MSK_TZ)
+        target = now_msk.replace(
+            hour=int(hours_text), minute=int(minutes_text), second=0, microsecond=0
+        )
+        if target <= now_msk:
+            target += timedelta(days=1)
+        return target.timestamp()
+
+    def _notify_heartbeat(self) -> None:
+        """Ежедневный дайджест-heartbeat в фиксированное время суток (МСК).
+
+        Дайджест уходит каждый день в ``heartbeat_time`` МСК (``None`` —
+        выключен); планировщик инициализируется ближайшим плановым временем
+        после старта процесса (до него — в тот же день, после — на следующий).
+        Если процесс простоял через несколько плановых отметок, уходит ровно
+        один дайджест — пропущенные дни не компенсируются (осознанный выбор
+        против спама).
+        Работает только в режиме постоянного процесса (``run_forever``):
+        расписание живёт в памяти процесса, в однократном режиме (``--once``,
+        cron) между запусками оно не сохраняется — дайджест-эксплуатация
+        предполагает постоянный процесс, при cron-эксплуатации дайджеста нет.
+        """
+        if self.once or self.config.heartbeat_time is None:
             return
         now = self._now_ts()
-        if now - self._last_heartbeat_sent < interval_seconds:
+        if now < self._next_heartbeat_ts:
             return
-        self._last_heartbeat_sent = now
+        self._next_heartbeat_ts = self._schedule_next_heartbeat(now)
         position = self.state.position
         position_text = (
             "flat"
@@ -811,7 +846,7 @@ class LiveRunner:
 
     @staticmethod
     def _now_ts() -> float:
-        """Текущее время в секундах (таймер heartbeat-дайджеста; точка для тестов)."""
+        """Текущее время в секундах (планировщик heartbeat-дайджеста; точка для тестов)."""
         return time.time()
 
 

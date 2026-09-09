@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Таймфрейм в стиле ccxt: одна или несколько цифр, затем m/h/d (напр. 15m, 4h, 1d).
 _TIMEFRAME_PATTERN = re.compile(r"^(\d+)([mhd])$")
+# Время суток heartbeat-дайджеста: строго "HH:MM" (ровно две цифры и двоеточие).
+_HEARTBEAT_TIME_PATTERN = re.compile(r"(\d{2}):(\d{2})")
 _TIMEFRAME_UNIT_MS = {"m": 60_000, "h": 3_600_000, "d": 86_400_000}
 _MAX_TIMEFRAME_MS = 86_400_000  # 1d
 
@@ -129,8 +131,8 @@ class LiveConfig(BaseModel):
             взять из env ``TELEGRAM_BOT_TOKEN`` (значения не логируются никогда).
         telegram_chat_id: chat id получателя уведомлений; ``None`` — взять из
             env ``TELEGRAM_CHAT_ID``.
-        heartbeat_hours: период heartbeat-дайджеста в Telegram, часы;
-            ``0`` — дайджест выключен.
+        heartbeat_time: время суток (формат ``"HH:MM"``, МСК), когда ежедневно
+            уходит heartbeat-дайджест в Telegram; ``None`` — дайджест выключен.
         error_throttle_minutes: минимальный интервал между уведомлениями
             категории «error» (сетевые/данные сбои), минуты.
     """
@@ -165,7 +167,7 @@ class LiveConfig(BaseModel):
     log_file: str = "logs/live.log"
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
-    heartbeat_hours: float = Field(default=24.0, ge=0.0)
+    heartbeat_time: str | None = "10:00"
     error_throttle_minutes: int = Field(default=60, ge=0)
 
     @field_validator("timeframe")
@@ -191,6 +193,49 @@ class LiveConfig(BaseModel):
         """Проверить, что имя стратегии непустое (существование проверит реестр)."""
         if not value.strip():
             raise ValueError("strategy must be a non-empty name")
+        return value
+
+    @field_validator("heartbeat_time", mode="before")
+    @classmethod
+    def _coerce_heartbeat_time(cls, value: object) -> object:
+        """Дать внятную ошибку для не-строковых значений (YAML-ловушка).
+
+        ``heartbeat_time: 10:00`` без кавычек YAML парсит как int 600
+        (шестидесятеричная запись минут/секунд); без этого валидатора pydantic
+        ответил бы непонятным «Input should be a valid string».
+
+        Raises:
+            ValueError: если значение не ``None`` и не строка.
+        """
+        if value is None or isinstance(value, str):
+            return value
+        raise ValueError(
+            f"heartbeat_time must be a string 'HH:MM' in 24-hour format, "
+            f"e.g. '10:00' (quote it in YAML); got {value!r}"
+        )
+
+    @field_validator("heartbeat_time")
+    @classmethod
+    def _validate_heartbeat_time(cls, value: str | None) -> str | None:
+        """Нормализовать пустую строку в ``None`` и проверить формат ``HH:MM``.
+
+        Raises:
+            ValueError: если время — не строго ``HH:MM`` (HH 00-23, MM 00-59).
+        """
+        if value is None or value == "":
+            return None
+        match = _HEARTBEAT_TIME_PATTERN.fullmatch(value)
+        if match is None:
+            raise ValueError(
+                f"heartbeat_time must be 'HH:MM' in 24-hour format, "
+                f"e.g. '10:00'; got {value!r}"
+            )
+        hours, minutes = int(match.group(1)), int(match.group(2))
+        if hours > 23 or minutes > 59:
+            raise ValueError(
+                f"heartbeat_time must be a valid time (HH 00-23, MM 00-59); "
+                f"got {value!r}"
+            )
         return value
 
     @model_validator(mode="after")
