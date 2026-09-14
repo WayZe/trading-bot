@@ -543,6 +543,64 @@ compose передаст их в контейнер (после создания
 контейнер: `docker compose up -d --force-recreate`); `.env` в git не
 коммитится. Подробности — в разделе «Уведомления Telegram».
 
+## Деплой на сервер
+
+Live-контур работает на VDS: каталог `/opt/trading-bot`, сервис `live`
+из `docker-compose.yml` (`restart: unless-stopped`). Состояние позиции
+и live-свечи живут в `./data` на сервере, логи — в `./logs`, конфиг
+монтируется из `./config`, секреты Telegram — в `.env` рядом с
+compose-файлом (см. раздел «Docker»). Ниже `<host>` — SSH-адрес сервера
+(удобно завести алиас в `~/.ssh/config`). На сервере нужны Docker и
+плагин compose.
+
+### Первичное развёртывание
+
+```bash
+# код (без git-истории, состояния и секретов — они живут только на сервере)
+rsync -a --exclude .git --exclude data --exclude logs --exclude reports \
+    --exclude .venv --exclude .env --exclude .zcode ./ <host>:/opt/trading-bot/
+ssh <host> 'cd /opt/trading-bot && docker compose up -d --build'
+```
+
+### Обновление кода
+
+У репозитория нет git-remote, поэтому обновления доставляются
+git-bundle'ом с рабочей машины (фаст-форвард серверного чекáута):
+
+```bash
+# локально: bundle с коммитами, которых ещё нет на сервере
+REMOTE=$(ssh <host> 'cd /opt/trading-bot && git rev-parse HEAD')
+git bundle create /tmp/trading-bot.bundle ${REMOTE}..main
+scp /tmp/trading-bot.bundle <host>:/tmp/
+
+# на сервере: fast-forward и пересборка контейнера
+cd /opt/trading-bot
+git fetch /tmp/trading-bot.bundle main:refs/remotes/bundle/main
+git merge --ff-only refs/remotes/bundle/main
+rm /tmp/trading-bot.bundle
+docker compose up -d --build
+```
+
+`merge --ff-only` откажется работать при незафиксированных правках в
+рабочем дереве сервера: перед обновлением уберите их в стэш
+(`git stash push -u -m pre-deploy`), а после merge сверьте
+`git diff stash@{0}`, что среди стэшнутого не было ничего серверного,
+и дропните стэш. Контейнер при этом пересоздаётся: позиция и стопы
+не теряются (state в `./data`), а в Telegram уходит стартовое
+сообщение.
+
+### Проверка после обновления
+
+```bash
+docker ps --filter name=trading-bot-live   # статус контейнера
+docker logs trading-bot-live --tail 50     # stdout: баннер старта
+tail -f logs/live.log                      # рабочий лог цикла
+```
+
+Суточный heartbeat-дайджест уходит в Telegram в `heartbeat_time` по МСК
+(по умолчанию 10:00); экстренный запрет ордеров без остановки контейнера —
+свитчи `data/live/STOP` и `data/live/PAUSE` (см. «Свитчи: STOP и PAUSE»).
+
 ## Структура репозитория
 
 ```
