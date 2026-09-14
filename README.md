@@ -564,24 +564,22 @@ ssh <host> 'cd /opt/trading-bot && docker compose up -d --build'
 
 ### Обновление кода
 
-У репозитория нет git-remote, поэтому обновления доставляются
-git-bundle'ом с рабочей машины (фаст-форвард серверного чекáута):
+Автоматически (основной путь): `git push` в `main` запускает GitHub
+Actions workflow `.github/workflows/deploy.yml` — тесты и `ruff`, затем
+по SSH на сервере выполняется `scripts/deploy.sh`: fast-forward до
+`origin/main` и `docker compose up -d --build`. Секреты workflow:
+`SSH_PRIVATE_KEY` (ключ, на сервере ограничен forced command — шелл им
+не получить), `SSH_HOST`, `SSH_USER`, `SSH_KNOWN_HOSTS` (пин fingerprint
+через `ssh-keyscan -H`). Каждый деплой подтверждён зелёными тестами,
+история — во вкладке Actions.
+
+Вручную (если Actions недоступен) — тот же скрипт прямо по SSH:
 
 ```bash
-# локально: bundle с коммитами, которых ещё нет на сервере
-REMOTE=$(ssh <host> 'cd /opt/trading-bot && git rev-parse HEAD')
-git bundle create /tmp/trading-bot.bundle ${REMOTE}..main
-scp /tmp/trading-bot.bundle <host>:/tmp/
-
-# на сервере: fast-forward и пересборка контейнера
-cd /opt/trading-bot
-git fetch /tmp/trading-bot.bundle main:refs/remotes/bundle/main
-git merge --ff-only refs/remotes/bundle/main
-rm /tmp/trading-bot.bundle
-docker compose up -d --build
+ssh <host> /opt/trading-bot/scripts/deploy.sh
 ```
 
-`merge --ff-only` откажется работать при незафиксированных правках в
+`git merge --ff-only` откажется работать при незафиксированных правках в
 рабочем дереве сервера: перед обновлением уберите их в стэш
 (`git stash push -u -m pre-deploy`), а после merge сверьте
 `git diff stash@{0}`, что среди стэшнутого не было ничего серверного,

@@ -1,0 +1,46 @@
+# Автоматический деплой: пуш в main → тесты и линтер → обновление сервера
+# по SSH. Секреты репозитория:
+#   SSH_PRIVATE_KEY — приватный ключ; на сервере он ограничен forced command
+#                     (ссылается на scripts/deploy.sh), шелл им не получить;
+#   SSH_HOST, SSH_USER — адрес сервера и пользователь;
+#   SSH_KNOWN_HOSTS — вывод `ssh-keyscan -H <host>` (пин fingerprint,
+#                     StrictHostKeyChecking=yes без интерактива).
+name: deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: uv sync
+      - name: Tests
+        run: uv run pytest
+      - name: Lint
+        run: uv run ruff check .
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to server
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          install -m 600 /dev/null deploy_key
+          printf '%s\n' "$SSH_PRIVATE_KEY" > deploy_key
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          ssh -i deploy_key -o BatchMode=yes -o StrictHostKeyChecking=yes \
+              "$SSH_USER@$SSH_HOST"
+          rm -f deploy_key
